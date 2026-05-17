@@ -1,0 +1,133 @@
+# CTH621 Pipeline Configuration
+# ALL hyperparameters live here — NEVER hardcode in Python files
+# Shared across all team members via version control
+
+# ============================================================
+# Global Settings
+# ============================================================
+random_state: 42
+base_output_dir: "outputs"
+base_data_dir: "data"
+log_level: "INFO"
+
+# Experiment tracking — set provider to "wandb", "mlflow", or "none"
+tracking:
+  provider: "wandb"          # or "mlflow" or "none"
+  wandb_project: "CTH621"
+  mlflow_tracking_uri: "http://localhost:5000"
+
+# ============================================================
+# Data Validation Thresholds
+# ============================================================
+validation:
+  group_a:
+    min_samples: 100
+    min_features: 5
+  group_b:
+    min_samples: 500
+  group_c:
+    image:
+      min_samples: 500
+      min_width: 256
+      min_height: 256
+    audio:
+      min_samples: 200
+    video:
+      min_samples: 50
+    text:
+      min_samples: 1000
+
+# ============================================================
+# EDA Settings
+# ============================================================
+eda:
+  normalization: "min-max"   # "min-max" or "z-score"
+  outlier_method: "iqr-cap"  # "iqr-cap" or "remove"
+  iqr_multiplier: 1.5
+  group_b_transforms:
+    - "forward_fill"
+    - "linear_interpolation"
+  # Optional: "differencing", "log_transform"
+
+# ============================================================
+# Classification
+# ============================================================
+classification:
+  test_size: 0.2
+  stratify: true
+  algorithms:
+    logistic:
+      max_iter: 1000
+      C: 1.0
+      solver: "lbfgs"
+    decision_tree:
+      max_depth: 5
+      min_samples_split: 10
+      criterion: "gini"
+    svm:
+      C: 1.0
+      kernel: "rbf"
+      gamma: "scale"
+
+# ============================================================
+# Regression (Time Series — NO random split)
+# ============================================================
+regression:
+  train_ratio: 0.8           # Chronological split — 80% earliest data
+  lags: [1, 7, 14]           # Lag features for XGBoost
+  rolling_windows: [7, 30]   # Rolling mean window sizes
+  algorithms:
+    linear_regression: {}    # No extra kwargs needed
+    arima:
+      order: [1, 1, 1]       # (p, d, q)
+      seasonal_order: [1, 1, 1, 12]   # (P, D, Q, s) — set s=0 to disable
+    xgboost:
+      n_estimators: 200
+      max_depth: 6
+      learning_rate: 0.05
+      subsample: 0.8
+      colsample_bytree: 0.8
+      early_stopping_rounds: 20
+
+# ============================================================
+# Clustering
+# ============================================================
+clustering:
+  max_k: 10                  # Upper bound for Elbow Method
+  linkage_method: "ward"     # Hierarchical: "ward", "complete", "average"
+  n_clusters: 3              # Used for Hierarchical cut and K-Means default
+  dbscan_eps: 0.5
+  dbscan_min_samples: 5
+  scaler: "standard"         # "standard" or "minmax"
+  # label_columns: per-dataset, override at CLI with --config
+
+# ============================================================
+# Dataset-Specific Overrides
+# (Override any global setting for a specific dataset)
+# ============================================================
+datasets:
+  student_performance:       # Example Group A dataset
+    type: "A"
+    file: "data/raw/student_performance.csv"
+    label_columns: ["Grade", "Pass_Fail", "GPA_Category"]
+    classification:
+      target_columns: ["Grade", "Pass_Fail", "GPA_Category"]
+    clustering:
+      label_columns: ["Grade", "Pass_Fail", "GPA_Category"]
+
+  stock_prices:              # Example Group B dataset
+    type: "B"
+    file: "data/raw/stock_prices.csv"
+    datetime_col: "Date"
+    target_col: "Close"
+    regression:
+      lags: [1, 5, 10, 20]
+      rolling_windows: [5, 20, 60]
+
+  image_dataset:             # Example Group C dataset (images)
+    type: "C"
+    subtype: "image"
+    dir: "data/raw/images/"
+    label_col: "label"
+    clustering:
+      label_columns: ["label"]

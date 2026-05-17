@@ -1,0 +1,189 @@
+# CTH621 Pipeline Configuration
+# ALL hyperparameters live here — NEVER hardcode in Python files
+# Shared across all team members via version control
+
+# ============================================================
+# Global Settings
+# ============================================================
+random_state: 42
+base_output_dir: "outputs"
+base_data_dir: "data"
+log_level: "INFO"
+
+# Experiment tracking — set provider to "wandb", "mlflow", or "none"
+tracking:
+  provider: "none"           # "wandb" | "mlflow" | "none"
+  wandb_project: "CTH621"
+  mlflow_tracking_uri: "http://localhost:5000"
+
+# ============================================================
+# Data Validation Thresholds
+# ============================================================
+validation:
+  group_a:
+    min_samples: 100
+    min_features: 5
+  group_b:
+    min_samples: 500
+  group_c:
+    image:
+      min_samples: 500
+      min_width: 256
+      min_height: 256
+    audio:
+      min_samples: 200
+    video:
+      min_samples: 50
+    text:
+      min_samples: 1000
+
+# ============================================================
+# EDA Settings
+# ============================================================
+eda:
+  normalization: "min-max"   # "min-max" or "z-score"
+  outlier_method: "iqr-cap"  # "iqr-cap" or "remove"
+  iqr_multiplier: 1.5
+  group_b_transforms:
+    - "forward_fill"
+    - "linear_interpolation"
+  # Uncomment to enable optional transforms:
+  # - "differencing"
+  # - "log_transform"
+
+# ============================================================
+# Classification
+# ============================================================
+classification:
+  test_size: 0.2
+  stratify: true
+  algorithms:
+    logistic:
+      max_iter: 1000
+      C: 1.0
+      solver: "lbfgs"
+    decision_tree:
+      max_depth: 5
+      min_samples_split: 10
+      criterion: "gini"
+    svm:
+      C: 1.0
+      kernel: "rbf"
+      gamma: "scale"
+
+# ============================================================
+# Regression (Time Series — NO random split)
+# ============================================================
+regression:
+  train_ratio: 0.8           # Chronological split — 80% earliest data
+  lags: [1, 7, 14]
+  rolling_windows: [7, 30]
+  algorithms:
+    linear_regression: {}
+    arima:
+      order: [1, 1, 1]
+      seasonal_order: [0, 0, 0, 0]   # Set s>0 to enable seasonal component
+    xgboost:
+      n_estimators: 200
+      max_depth: 6
+      learning_rate: 0.05
+      subsample: 0.8
+      colsample_bytree: 0.8
+      early_stopping_rounds: 20
+
+# ============================================================
+# Clustering
+# ============================================================
+clustering:
+  max_k: 10
+  linkage_method: "ward"     # "ward" | "complete" | "average"
+  n_clusters: 3
+  dbscan_eps: 0.5
+  dbscan_min_samples: 5
+  scaler: "standard"         # "standard" | "minmax"
+
+# ============================================================
+# Dataset-Specific Configurations
+#
+# Cấu trúc mỗi dataset:
+#   <dataset_name>:
+#     type: "A" | "B" | "C"
+#     file: "data/raw/..."
+#
+#     <task>:               # classification | regression | clustering
+#       # --- Task-level params (override global nếu khai báo) ---
+#       test_size: 0.15        # classification: override global test_size
+#       train_ratio: 0.85      # regression:     override global train_ratio
+#       lags: [1, 5, 10]       # regression:     override global lags
+#       rolling_windows: [5, 20] # regression:   override global rolling_windows
+#       max_k: 8               # clustering:     override global max_k
+#       n_clusters: 4          # clustering:     override global n_clusters
+#       dbscan_eps: 0.3        # clustering:     override global dbscan_eps
+#
+#       # --- Algorithm selection (OPTIONAL) ---
+#       algorithms:            # Nếu KHÔNG khai báo → dùng toàn bộ global algorithms
+#         <algo_name>:         # Nếu CÓ → CHỈ chạy các algo được liệt kê ở đây
+#           <param>: <value>   # Dataset params OVERRIDE global (shallow merge)
+#
+# Priority (cao → thấp):
+#   1. CLI --algo   → chỉ chạy 1 algo đó, bất kể config
+#   2. datasets[name][task].algorithms → chỉ chạy algo khai báo
+#   3. Global [task].algorithms → fallback, chạy tất cả
+# ============================================================
+datasets:
+
+  # ── Group A: Dữ liệu dạng bảng ──────────────────────────────────────────
+  student_performance:
+    type: "A"
+    file: "data/raw/student_performance.csv"
+    classification:
+      target_columns: ["Grade", "Pass_Fail", "GPA_Category"]
+      # Chỉ chạy 2 algo; svm bị bỏ qua cho dataset này
+      algorithms:
+        logistic:
+          C: 0.5                   # Override global C: 1.0
+          max_iter: 2000           # Override global max_iter: 1000
+        decision_tree:
+          max_depth: 8             # Override global max_depth: 5
+          min_samples_split: 5     # Override global min_samples_split: 10
+    clustering:
+      label_columns: ["Grade", "Pass_Fail", "GPA_Category"]
+      max_k: 8                     # Override global max_k: 10
+      n_clusters: 4                # Override global n_clusters: 3
+
+  # ── Group B: Dữ liệu chuỗi thời gian ────────────────────────────────────
+  stock_prices:
+    type: "B"
+    file: "data/raw/stock_prices.csv"
+    datetime_col: "Date"
+    target_col: "Close"
+    regression:
+      train_ratio: 0.85            # Override global 0.8
+      lags: [1, 5, 10, 20]         # Override global lags
+      rolling_windows: [5, 20, 60] # Override global rolling_windows
+      # Chỉ chạy 2 algo; linear_regression bị bỏ qua
+      algorithms:
+        arima:
+          order: [2, 1, 2]         # Override global [1, 1, 1]
+          seasonal_order: [0, 0, 0, 0]
+        xgboost:
+          n_estimators: 300        # Override global 200
+          max_depth: 4             # Override global 6
+          learning_rate: 0.03      # Override global 0.05
+          subsample: 0.9
+          colsample_bytree: 0.8
+          early_stopping_rounds: 30
+    clustering:
+      label_columns: []
+      dbscan_eps: 0.3              # Override global 0.5
+      dbscan_min_samples: 3        # Override global 5
+
+  # ── Group C: Dữ liệu đa phương tiện ─────────────────────────────────────
+  image_dataset:
+    type: "C"
+    subtype: "image"
+    dir: "data/raw/images/"
+    clustering:
+      label_columns: ["label"]
+      max_k: 6                     # Override global max_k: 10
+      n_clusters: 5                # Override global n_clusters: 3

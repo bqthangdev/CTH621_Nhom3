@@ -1,0 +1,75 @@
+# =============================================================
+# CTH621 — .gitignore
+# Giữ .gitkeep để track empty folders, bỏ qua data và output files
+# =============================================================
+
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ── Virtual Environment ───────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── Jupyter ───────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── IDE / Editor ──────────────────────────────────────────────
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── Environment & Secrets ─────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Experiment Tracking ───────────────────────────────────────
+wandb/
+mlruns/
+mlflow.db
+
+# ── Data files (giữ folder qua .gitkeep, không commit data thật) ──
+data/raw/*.csv
+data/raw/*.xlsx
+data/raw/*.parquet
+data/raw/*.json
+data/raw/*.tsv
+data/raw/images/**
+!data/raw/images/.gitkeep
+data/interim/*.parquet
+data/interim/*.csv
+data/processed/*.parquet
+data/processed/*.csv
+
+# ── Output files ──────────────────────────────────────────────
+# Giữ lại .gitkeep trong outputs/, bỏ qua file được sinh ra
+outputs/**/*.png
+outputs/**/*.jpg
+outputs/**/*.joblib
+outputs/**/*.pkl
+outputs/**/*.csv
+outputs/**/*.xlsx
+
+# ── Logs ──────────────────────────────────────────────────────
+logs/*.log
+logs/*.txt
+
+# ── Runtime state ─────────────────────────────────────────────
+progress.json
+
+# ── QUAN TRỌNG: Không bao giờ ignore .gitkeep ─────────────────
+!**/.gitkeep
