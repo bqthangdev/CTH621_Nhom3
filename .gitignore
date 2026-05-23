@@ -49,6 +49,7 @@ data/raw/*.parquet
 data/raw/*.json
 data/raw/*.tsv
 data/raw/images/*.*
+data/raw/images
 !data/raw/images/.gitkeep
 data/interim/*.parquet
 data/interim/*.csv
