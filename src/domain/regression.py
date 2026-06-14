@@ -1,7 +1,8 @@
 """
 Domain — Regression (Time Series)
 KHÔNG dùng random split — chỉ dùng chronological split.
-Hỗ trợ: Linear Regression, ARIMA/SARIMA, XGBoost với rolling-window features.
+Hỗ trợ: Linear Regression, Ridge, Lasso, Random Forest Regressor, SVR,
+         ARIMA/SARIMA, XGBoost với rolling-window features.
 """
 
 import os
@@ -15,13 +16,25 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LinearRegression
+from sklearn.base import clone
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import Lasso, LinearRegression, Ridge
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.svm import SVR
 
 from src.domain.classification import _append_summary
 from src.infrastructure.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Sklearn regressors chạy qua lag-feature pipeline chung
+_SKLEARN_REG_MAP: dict = {
+    "ridge": Ridge,
+    "lasso": Lasso,
+    "random_forest_regressor": RandomForestRegressor,
+    "svr": SVR,
+}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -80,19 +93,73 @@ def chronological_split(df: pd.DataFrame, train_ratio: float = 0.8):
 # Regression Pipelines
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _eval_metrics(y_true, y_pred, algo: str, dataset_name: str, target_col: str, config: dict) -> dict:
+def _eval_metrics(
+    y_true, y_pred, algo: str, dataset_name: str, target_col: str,
+    config: dict, cv_metrics: dict | None = None,
+) -> dict:
     mae = mean_absolute_error(y_true, y_pred)
     rmse = np.sqrt(mean_squared_error(y_true, y_pred))
     r2 = r2_score(y_true, y_pred)
     logger.info(f"[REGRESSION] {algo} | MAE={mae:.4f} | RMSE={rmse:.4f} | R²={r2:.4f}")
+    if cv_metrics:
+        logger.info(
+            f"[REGRESSION] {algo} | TimeSeriesSplit CV | "
+            f"MAE={cv_metrics['cv_mae_mean']}±{cv_metrics['cv_mae_std']} | "
+            f"RMSE={cv_metrics['cv_rmse_mean']}±{cv_metrics['cv_rmse_std']}"
+        )
     result = {
         "dataset": dataset_name, "task": "regression",
         "algorithm": algo, "target_col": target_col,
         "split": f"chronological_{config.get('regression', {}).get('train_ratio', 0.8):.0%}",
         "mae": round(mae, 4), "rmse": round(rmse, 4), "r2": round(r2, 4),
     }
+    if cv_metrics:
+        result.update(cv_metrics)
     _append_summary(result)
+    from src.infrastructure import tracker
+    track_metrics = {"mae": round(mae, 4), "rmse": round(rmse, 4), "r2": round(r2, 4)}
+    if cv_metrics:
+        track_metrics.update(cv_metrics)
+    tracker.log_run(
+        config,
+        run_name=f"{dataset_name}/{algo}/{target_col}",
+        params={"algorithm": algo, "target_col": target_col},
+        metrics=track_metrics,
+        tags={"task": "regression", "dataset": dataset_name},
+    )
     return result
+
+
+def _cv_timeseries(
+    estimator,
+    X_feat: np.ndarray,
+    y: "pd.Series",
+    n_splits: int,
+) -> dict:
+    """
+    TimeSeriesSplit cross-validation cho sklearn regressors.
+    Trả về dict cv_mae_mean/std, cv_rmse_mean/std, cv_r2_mean/std.
+    """
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    maes, rmses, r2s = [], [], []
+    for tr_idx, te_idx in tscv.split(X_feat):
+        X_tr, X_te = X_feat[tr_idx], X_feat[te_idx]
+        y_tr = y.iloc[tr_idx] if hasattr(y, "iloc") else y[tr_idx]
+        y_te = y.iloc[te_idx] if hasattr(y, "iloc") else y[te_idx]
+        m = clone(estimator)
+        m.fit(X_tr, y_tr)
+        pred = m.predict(X_te)
+        maes.append(mean_absolute_error(y_te, pred))
+        rmses.append(np.sqrt(mean_squared_error(y_te, pred)))
+        r2s.append(r2_score(y_te, pred))
+    return {
+        "cv_mae_mean":  round(float(np.mean(maes)),  4),
+        "cv_mae_std":   round(float(np.std(maes)),   4),
+        "cv_rmse_mean": round(float(np.mean(rmses)), 4),
+        "cv_rmse_std":  round(float(np.std(rmses)),  4),
+        "cv_r2_mean":   round(float(np.mean(r2s)),   4),
+        "cv_r2_std":    round(float(np.std(r2s)),    4),
+    }
 
 
 def _plot_predictions(y_true, y_pred, title: str, out_path: str) -> None:
@@ -105,6 +172,32 @@ def _plot_predictions(y_true, y_pred, title: str, out_path: str) -> None:
     fig.savefig(out_path, bbox_inches="tight", dpi=150)
     plt.close(fig)
     logger.info(f"[REGRESSION] Đã lưu biểu đồ dự đoán → {out_path}")
+
+
+def _plot_residuals(y_true, y_pred, title: str, out_path: str) -> None:
+    """Residual plot: phần dư theo thời gian + scatter vs predicted — phát hiện lỗi hệ thống."""
+    residuals = np.array(y_true) - np.array(y_pred)
+    fig, axes = plt.subplots(1, 2, figsize=(14, 4))
+
+    # Residual theo thời gian
+    axes[0].plot(residuals, color="#DD8452", linewidth=0.8, alpha=0.85)
+    axes[0].axhline(0, color="black", linewidth=1, linestyle="--")
+    axes[0].set_title(f"Residuals theo thời gian — {title}")
+    axes[0].set_xlabel("Index")
+    axes[0].set_ylabel("Residual (Thực tế − Dự đoán)")
+
+    # Residual vs Predicted — phát hiện bias theo vùng giá trị
+    axes[1].scatter(y_pred, residuals, alpha=0.4, color="#4C72B0", s=15, edgecolors="none")
+    axes[1].axhline(0, color="red", linewidth=1.2, linestyle="--")
+    axes[1].set_title(f"Residuals vs Predicted — {title}")
+    axes[1].set_xlabel("Predicted")
+    axes[1].set_ylabel("Residual")
+
+    plt.tight_layout()
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, bbox_inches="tight", dpi=150)
+    plt.close(fig)
+    logger.info(f"[REGRESSION] Residual plot → {out_path}")
 
 
 class RegressionPipeline:
@@ -157,21 +250,78 @@ class RegressionPipeline:
             return self._run_xgboost(df, target_col, dataset_name, config, reg_cfg, train_ratio, out_dir, model_dir)
         elif self.algorithm == "arima":
             return self._run_arima(df, target_col, dataset_name, config, reg_cfg, train_ratio, out_dir, model_dir)
+        elif self.algorithm in _SKLEARN_REG_MAP:
+            return self._run_sklearn_lag(df, target_col, dataset_name, config, reg_cfg, train_ratio, out_dir, model_dir)
         else:
             raise ValueError(f"Thuật toán không hợp lệ: '{self.algorithm}'")
+
+    def _run_sklearn_lag(self, df, target_col, dataset_name, config, reg_cfg, train_ratio, out_dir, model_dir):
+        """
+        Pipeline chung cho các sklearn regressor sử dụng lag + rolling features.
+        Áp dụng cho: Ridge, Lasso, RandomForestRegressor, SVR.
+        """
+        lags = reg_cfg.get("lags", [1, 7, 14])
+        windows = reg_cfg.get("rolling_windows", [7, 30])
+        df_feat = build_lag_features(df[[target_col]], target_col, lags, windows)
+        feature_cols = [c for c in df_feat.columns if c != target_col]
+        train, test = chronological_split(df_feat, train_ratio)
+
+        model_path = os.path.join(model_dir, f"reg_{self.algorithm}_{target_col}.joblib")
+        if Path(model_path).exists():
+            logger.info(f"[REGRESSION] Nạp {self.algorithm} model từ checkpoint → {model_path}")
+            self.model = joblib.load(model_path)
+        else:
+            EstimatorClass = _SKLEARN_REG_MAP[self.algorithm]
+            try:
+                self.model = EstimatorClass(random_state=self.random_state, **self.kwargs)
+            except TypeError:
+                # SVR, Ridge, Lasso không nhận random_state
+                self.model = EstimatorClass(**self.kwargs)
+            self.model.fit(train[feature_cols], train[target_col])
+            joblib.dump(self.model, model_path)
+            logger.info(f"[REGRESSION] {self.algorithm} model đã lưu → {model_path}")
+
+        y_pred = self.model.predict(test[feature_cols])
+        _plot_predictions(
+            test[target_col], y_pred,
+            f"{self.algorithm} — {target_col}",
+            os.path.join(out_dir, f"{self.algorithm}_{target_col}.png"),
+        )
+        _plot_residuals(
+            test[target_col], y_pred,
+            f"{self.algorithm} — {target_col}",
+            os.path.join(out_dir, f"residual_{self.algorithm}_{target_col}.png"),
+        )
+        n_splits = reg_cfg.get("cv_n_splits", 5)
+        X_feat_all = df_feat[feature_cols].values
+        y_feat_all = df_feat[target_col]
+        cv_metrics = _cv_timeseries(self.model, X_feat_all, y_feat_all, n_splits)
+        return _eval_metrics(test[target_col], y_pred, self.algorithm, dataset_name, target_col, config, cv_metrics=cv_metrics)
 
     def _run_linear(self, df, target_col, dataset_name, config, train_ratio, out_dir, model_dir):
         train, test = chronological_split(df[[target_col]], train_ratio)
         # Dùng timestep index làm feature đơn giản
         X_train = np.arange(len(train)).reshape(-1, 1)
         X_test = np.arange(len(train), len(train) + len(test)).reshape(-1, 1)
-        self.model = LinearRegression()
-        self.model.fit(X_train, train[target_col])
+        model_path = os.path.join(model_dir, f"reg_linear_{target_col}.joblib")
+        if Path(model_path).exists():
+            logger.info(f"[REGRESSION] Nạp Linear Regression model từ checkpoint → {model_path}")
+            self.model = joblib.load(model_path)
+        else:
+            self.model = LinearRegression()
+            self.model.fit(X_train, train[target_col])
+            joblib.dump(self.model, model_path)
+            logger.info(f"[REGRESSION] Linear Regression model đã lưu → {model_path}")
         y_pred = self.model.predict(X_test)
         _plot_predictions(test[target_col], y_pred, f"Linear Regression — {target_col}",
                           os.path.join(out_dir, f"linear_{target_col}.png"))
-        joblib.dump(self.model, os.path.join(model_dir, f"reg_linear_{target_col}.joblib"))
-        return _eval_metrics(test[target_col], y_pred, self.algorithm, dataset_name, target_col, config)
+        _plot_residuals(test[target_col], y_pred, f"Linear Regression — {target_col}",
+                        os.path.join(out_dir, f"residual_linear_{target_col}.png"))
+        n_splits = config.get("regression", {}).get("cv_n_splits", 5)
+        X_all = np.arange(len(df[[target_col]])).reshape(-1, 1)
+        y_all = df[target_col]
+        cv_metrics = _cv_timeseries(self.model, X_all, y_all, n_splits)
+        return _eval_metrics(test[target_col], y_pred, self.algorithm, dataset_name, target_col, config, cv_metrics=cv_metrics)
 
     def _run_xgboost(self, df, target_col, dataset_name, config, reg_cfg, train_ratio, out_dir, model_dir):
         try:
@@ -188,24 +338,37 @@ class RegressionPipeline:
 
         early_stop = self.kwargs.pop("early_stopping_rounds", None)
         kwargs = {k: v for k, v in self.kwargs.items() if k != "early_stopping_rounds"}
-        self.model = XGBRegressor(
-            random_state=self.random_state,
-            **kwargs,
-        )
-        fit_params = {}
-        if early_stop:
-            fit_params = {
-                "eval_set": [(test[feature_cols], test[target_col])],
-                "verbose": False,
-            }
-            self.model.set_params(early_stopping_rounds=early_stop)
-
-        self.model.fit(train[feature_cols], train[target_col], **fit_params)
+        model_path = os.path.join(model_dir, f"reg_xgb_{target_col}.joblib")
+        if Path(model_path).exists():
+            logger.info(f"[REGRESSION] Nạp XGBoost model từ checkpoint → {model_path}")
+            self.model = joblib.load(model_path)
+        else:
+            self.model = XGBRegressor(
+                random_state=self.random_state,
+                **kwargs,
+            )
+            fit_params = {}
+            if early_stop:
+                fit_params = {
+                    "eval_set": [(test[feature_cols], test[target_col])],
+                    "verbose": False,
+                }
+                self.model.set_params(early_stopping_rounds=early_stop)
+            self.model.fit(train[feature_cols], train[target_col], **fit_params)
+            joblib.dump(self.model, model_path)
+            logger.info(f"[REGRESSION] XGBoost model đã lưu → {model_path}")
         y_pred = self.model.predict(test[feature_cols])
         _plot_predictions(test[target_col], y_pred, f"XGBoost — {target_col}",
                           os.path.join(out_dir, f"xgb_{target_col}.png"))
-        joblib.dump(self.model, os.path.join(model_dir, f"reg_xgb_{target_col}.joblib"))
-        return _eval_metrics(test[target_col], y_pred, "xgboost", dataset_name, target_col, config)
+        _plot_residuals(test[target_col], y_pred, f"XGBoost — {target_col}",
+                        os.path.join(out_dir, f"residual_xgb_{target_col}.png"))
+        # CV không dùng early_stopping_rounds (không hỗ trợ eval_set trong TimeSeriesSplit)
+        n_splits = reg_cfg.get("cv_n_splits", 5)
+        xgb_cv = XGBRegressor(random_state=self.random_state, **kwargs)
+        X_feat_all = df_feat[feature_cols].values
+        y_feat_all = df_feat[target_col]
+        cv_metrics = _cv_timeseries(xgb_cv, X_feat_all, y_feat_all, n_splits)
+        return _eval_metrics(test[target_col], y_pred, "xgboost", dataset_name, target_col, config, cv_metrics=cv_metrics)
 
     def _run_arima(self, df, target_col, dataset_name, config, reg_cfg, train_ratio, out_dir, model_dir):
         try:
@@ -221,13 +384,29 @@ class RegressionPipeline:
         split_idx = int(len(series) * train_ratio)
         train_s, test_s = series.iloc[:split_idx], series.iloc[split_idx:]
 
-        self.model = SARIMAX(train_s, order=order, seasonal_order=seasonal_order)
-        fitted = self.model.fit(disp=False)
-        y_pred = fitted.forecast(steps=len(test_s))
+        model_path = os.path.join(model_dir, f"reg_arima_{target_col}.pkl")
+        if Path(model_path).exists():
+            try:
+                from statsmodels.tsa.statespace.sarimax import SARIMAXResults
+                fitted = SARIMAXResults.load(model_path)
+                logger.info(f"[REGRESSION] Nạp ARIMA model từ checkpoint → {model_path}")
+            except Exception as e:
+                logger.warning(
+                    f"[REGRESSION] Không load được ARIMA checkpoint: {e}. Sẽ train lại."
+                )
+                fitted = None
+        else:
+            fitted = None
 
+        if fitted is None:
+            self.model = SARIMAX(train_s, order=order, seasonal_order=seasonal_order)
+            fitted = self.model.fit(disp=False)
+            fitted.save(model_path)
+            logger.info(f"[REGRESSION] ARIMA model đã lưu → {model_path}")
+
+        y_pred = fitted.forecast(steps=len(test_s))
         _plot_predictions(test_s, y_pred.values, f"ARIMA — {target_col}",
                           os.path.join(out_dir, f"arima_{target_col}.png"))
-        fitted.save(os.path.join(model_dir, f"reg_arima_{target_col}.pkl"))
         return _eval_metrics(test_s, y_pred.values, "arima", dataset_name, target_col, config)
 
 

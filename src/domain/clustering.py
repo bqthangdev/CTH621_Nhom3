@@ -15,9 +15,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import seaborn as sns
 from scipy.cluster.hierarchy import dendrogram, fcluster, linkage
 from sklearn.cluster import DBSCAN, KMeans
 from sklearn.metrics import silhouette_score
+from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
 from src.domain.classification import _append_summary
@@ -35,6 +37,54 @@ def _savefig(fig, path: str) -> None:
     fig.savefig(path, bbox_inches="tight", dpi=150)
     plt.close(fig)
     logger.info(f"[CLUSTER] Đã lưu biểu đồ → {path}")
+
+
+def _plot_cluster_pca(
+    X_scaled: np.ndarray, labels: np.ndarray,
+    algo_name: str, dataset_name: str, out_dir: str
+) -> None:
+    """PCA 2D scatter — chiếu các cluster xuống 2D để trực quan hóa cấu trúc phân cụm."""
+    try:
+        from sklearn.decomposition import PCA
+        n_components = min(2, X_scaled.shape[1])
+        pca = PCA(n_components=n_components, random_state=42)
+        X_2d = pca.fit_transform(X_scaled)
+        explained = pca.explained_variance_ratio_
+
+        unique_labels = sorted(set(labels))
+        n_clusters = len([l for l in unique_labels if l != -1])
+        palette = sns.color_palette("tab10", max(n_clusters, 1))
+        color_map = {}  # label → color
+        ci = 0
+        for lbl in unique_labels:
+            color_map[lbl] = "#aaaaaa" if lbl == -1 else palette[ci % len(palette)]
+            if lbl != -1:
+                ci += 1
+
+        fig, ax = plt.subplots(figsize=(8, 6))
+        for lbl in unique_labels:
+            mask = labels == lbl
+            label_name = "Outlier" if lbl == -1 else f"Cluster {lbl}"
+            marker = "x" if lbl == -1 else "o"
+            ax.scatter(
+                X_2d[mask, 0],
+                X_2d[mask, 1] if n_components > 1 else np.zeros(mask.sum()),
+                c=[color_map[lbl]] * mask.sum(),
+                label=label_name, marker=marker,
+                alpha=0.55, s=18, linewidths=0.3,
+            )
+
+        x_label = f"PC1 ({explained[0]*100:.1f}%)"
+        y_label = f"PC2 ({explained[1]*100:.1f}%)" if n_components > 1 else "PC2"
+        ax.set_xlabel(x_label)
+        ax.set_ylabel(y_label)
+        ax.set_title(f"Cluster Scatter (PCA 2D) — {algo_name} / {dataset_name}")
+        ax.legend(loc="best", markerscale=1.8, fontsize=8,
+                  ncol=max(1, len(unique_labels) // 8))
+        plt.tight_layout()
+        _savefig(fig, os.path.join(out_dir, f"scatter_pca_{algo_name}.png"))
+    except Exception as e:
+        logger.warning(f"[CLUSTER] Bỏ qua PCA scatter ({algo_name}): {e}")
 
 
 class ClusteringPipeline:
@@ -105,6 +155,7 @@ class ClusteringPipeline:
         results["kmeans"] = self._run_kmeans(X_scaled, X.index, cl_cfg, out_dir, model_dir, dataset_name, config)
         results["hierarchical"] = self._run_hierarchical(X_scaled, X.index, cl_cfg, out_dir, dataset_name, config)
         results["dbscan"] = self._run_dbscan(X_scaled, X.index, cl_cfg, out_dir, dataset_name, config)
+        results["gaussian_mixture"] = self._run_gaussian_mixture(X_scaled, X.index, cl_cfg, out_dir, dataset_name, config)
 
         logger.info(f"[CLUSTER] Hoàn thành clustering cho {dataset_name}")
         return results
@@ -113,11 +164,20 @@ class ClusteringPipeline:
 
     def _run_kmeans(self, X_scaled, index, cl_cfg, out_dir, model_dir, dataset_name, config):
         max_k = cl_cfg.get("max_k", 10)
+        kmeans_init = cl_cfg.get("kmeans_init", "k-means++")
+        kmeans_n_init = cl_cfg.get("kmeans_n_init", 10)
+        kmeans_max_iter = cl_cfg.get("kmeans_max_iter", 300)
         k_range = range(2, max_k + 1)
         inertias, sil_scores = [], []
 
         for k in k_range:
-            km = KMeans(n_clusters=k, random_state=self.random_state, n_init=10)
+            km = KMeans(
+                n_clusters=k,
+                init=kmeans_init,
+                n_init=kmeans_n_init,
+                max_iter=kmeans_max_iter,
+                random_state=self.random_state,
+            )
             labels = km.fit_predict(X_scaled)
             inertias.append(km.inertia_)
             sil_scores.append(silhouette_score(X_scaled, labels))
@@ -137,18 +197,68 @@ class ClusteringPipeline:
         best_k = list(k_range)[int(np.argmax(sil_scores))]
         logger.info(f"[CLUSTER] K-Means: best_k={best_k}, silhouette={max(sil_scores):.4f}")
 
-        km_final = KMeans(n_clusters=best_k, random_state=self.random_state, n_init=10)
+        km_final = KMeans(
+            n_clusters=best_k,
+            init=kmeans_init,
+            n_init=kmeans_n_init,
+            max_iter=kmeans_max_iter,
+            random_state=self.random_state,
+        )
         final_labels = km_final.fit_predict(X_scaled)
         joblib.dump(km_final, os.path.join(model_dir, "cluster_kmeans.joblib"))
 
         labels_df = pd.DataFrame({"kmeans_cluster": final_labels}, index=index)
         labels_df.to_csv(os.path.join(out_dir, "kmeans_labels.csv"))
+        _plot_cluster_pca(X_scaled, final_labels, "kmeans", dataset_name, out_dir)
 
-        result = {"n_clusters": best_k, "silhouette_score": round(max(sil_scores), 4)}
+        # ── Subsampling CV: đánh giá độ ổn định silhouette ───────────────────────
+        cv_n_splits = cl_cfg.get("cv_n_splits", 5)
+        rng = np.random.RandomState(self.random_state)
+        n_total = len(X_scaled)
+        cv_sil_list = []
+        for _ in range(cv_n_splits):
+            idx = rng.choice(n_total, size=int(0.8 * n_total), replace=False)
+            km_cv = KMeans(
+                n_clusters=best_k, init=kmeans_init,
+                n_init=kmeans_n_init, max_iter=kmeans_max_iter,
+                random_state=self.random_state,
+            )
+            km_cv.fit(X_scaled[idx])
+            labels_cv = km_cv.predict(X_scaled)
+            try:
+                cv_sil_list.append(silhouette_score(X_scaled, labels_cv))
+            except Exception:
+                cv_sil_list.append(np.nan)
+        cv_sil_mean = round(float(np.nanmean(cv_sil_list)), 4)
+        cv_sil_std  = round(float(np.nanstd(cv_sil_list)),  4)
+        logger.info(
+            f"[CLUSTER] K-Means subsampling CV ({cv_n_splits}x) | "
+            f"Silhouette={cv_sil_mean}±{cv_sil_std}"
+        )
+
+        result = {
+            "n_clusters": best_k,
+            "silhouette_score": round(max(sil_scores), 4),
+            "cv_silhouette_mean": cv_sil_mean,
+            "cv_silhouette_std":  cv_sil_std,
+        }
         _append_summary({
             "dataset": dataset_name, "task": "clustering", "algorithm": "kmeans",
             "n_clusters": best_k, "silhouette_score": result["silhouette_score"],
+            "cv_silhouette_mean": cv_sil_mean, "cv_silhouette_std": cv_sil_std,
         })
+        from src.infrastructure import tracker
+        tracker.log_run(
+            config,
+            run_name=f"{dataset_name}/kmeans",
+            params={"algorithm": "kmeans", "n_clusters": best_k},
+            metrics={
+                "silhouette_score":   round(max(sil_scores), 4),
+                "cv_silhouette_mean": cv_sil_mean,
+                "cv_silhouette_std":  cv_sil_std,
+            },
+            tags={"task": "clustering", "dataset": dataset_name},
+        )
         return result
 
     # ── Hierarchical ─────────────────────────────────────────────────────────
@@ -156,8 +266,11 @@ class ClusteringPipeline:
     def _run_hierarchical(self, X_scaled, index, cl_cfg, out_dir, dataset_name, config):
         method = cl_cfg.get("linkage_method", "ward")
         n_clusters = cl_cfg.get("n_clusters", 3)
+        # ward chỉ hỗ trợ euclidean — bỏ qua metric config nếu dùng ward
+        metric = cl_cfg.get("hierarchical_metric", "euclidean")
+        effective_metric = "euclidean" if method == "ward" else metric
 
-        Z = linkage(X_scaled, method=method)
+        Z = linkage(X_scaled, method=method, metric=effective_metric)
 
         # Dendrogram (lấy mẫu tối đa 200 điểm để tránh quá tải)
         fig, ax = plt.subplots(figsize=(14, 6))
@@ -179,11 +292,20 @@ class ClusteringPipeline:
 
         labels_df = pd.DataFrame({"hierarchical_cluster": labels}, index=index)
         labels_df.to_csv(os.path.join(out_dir, "hierarchical_labels.csv"))
+        _plot_cluster_pca(X_scaled, labels, "hierarchical", dataset_name, out_dir)
 
         _append_summary({
             "dataset": dataset_name, "task": "clustering", "algorithm": "hierarchical",
             "n_clusters": n_clusters, "silhouette_score": round(float(sil), 4) if not np.isnan(sil) else "",
         })
+        from src.infrastructure import tracker
+        tracker.log_run(
+            config,
+            run_name=f"{dataset_name}/hierarchical",
+            params={"algorithm": "hierarchical", "n_clusters": n_clusters},
+            metrics={"silhouette_score": round(float(sil), 4) if not np.isnan(sil) else 0.0},
+            tags={"task": "clustering", "dataset": dataset_name},
+        )
         return {"n_clusters": n_clusters, "silhouette_score": sil}
 
     # ── DBSCAN ───────────────────────────────────────────────────────────────
@@ -191,8 +313,9 @@ class ClusteringPipeline:
     def _run_dbscan(self, X_scaled, index, cl_cfg, out_dir, dataset_name, config):
         eps = cl_cfg.get("dbscan_eps", 0.5)
         min_samples = cl_cfg.get("dbscan_min_samples", 5)
+        metric = cl_cfg.get("dbscan_metric", "euclidean")
 
-        db = DBSCAN(eps=eps, min_samples=min_samples)
+        db = DBSCAN(eps=eps, min_samples=min_samples, metric=metric)
         labels = db.fit_predict(X_scaled)
 
         n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
@@ -209,6 +332,7 @@ class ClusteringPipeline:
 
         labels_df = pd.DataFrame({"dbscan_cluster": labels}, index=index)
         labels_df.to_csv(os.path.join(out_dir, "dbscan_labels.csv"))
+        _plot_cluster_pca(X_scaled, labels, "dbscan", dataset_name, out_dir)
 
         _append_summary({
             "dataset": dataset_name, "task": "clustering", "algorithm": "dbscan",
@@ -216,7 +340,99 @@ class ClusteringPipeline:
             "silhouette_score": round(float(sil), 4) if not np.isnan(sil) else "",
             "notes": f"outliers={n_outliers}",
         })
+        from src.infrastructure import tracker
+        tracker.log_run(
+            config,
+            run_name=f"{dataset_name}/dbscan",
+            params={"algorithm": "dbscan", "n_clusters": n_clusters, "n_outliers": n_outliers},
+            metrics={"silhouette_score": round(float(sil), 4) if not np.isnan(sil) else 0.0},
+            tags={"task": "clustering", "dataset": dataset_name},
+        )
         return {"n_clusters": n_clusters, "n_outliers": n_outliers, "silhouette_score": sil}
+
+
+    # ── Gaussian Mixture Model ───────────────────────────────────────────────
+
+    def _run_gaussian_mixture(self, X_scaled, index, cl_cfg, out_dir, dataset_name, config):
+        n_components = cl_cfg.get("gmm_n_components", 3)
+        covariance_type = cl_cfg.get("gmm_covariance_type", "full")
+
+        gmm = GaussianMixture(
+            n_components=n_components,
+            covariance_type=covariance_type,
+            max_iter=cl_cfg.get("gmm_max_iter", 100),
+            n_init=cl_cfg.get("gmm_n_init", 3),
+            tol=cl_cfg.get("gmm_tol", 0.001),
+            random_state=self.random_state,
+        )
+        labels = gmm.fit_predict(X_scaled)
+
+        try:
+            sil = silhouette_score(X_scaled, labels) if n_components > 1 else np.nan
+        except Exception:
+            sil = np.nan
+
+        sil_str = f"{sil:.4f}" if not np.isnan(sil) else "nan"
+        logger.info(
+            f"[CLUSTER] GMM: n_components={n_components}, "
+            f"covariance={covariance_type}, silhouette={sil_str}"
+        )
+
+        labels_df = pd.DataFrame({"gmm_cluster": labels}, index=index)
+        labels_df.to_csv(os.path.join(out_dir, "gmm_labels.csv"))
+        _plot_cluster_pca(X_scaled, labels, "gmm", dataset_name, out_dir)
+
+        # ── Subsampling CV: đánh giá độ ổn định silhouette ───────────────────────
+        cv_n_splits = cl_cfg.get("cv_n_splits", 5)
+        rng = np.random.RandomState(self.random_state)
+        n_total = len(X_scaled)
+        cv_sil_list_gmm = []
+        for _ in range(cv_n_splits):
+            idx = rng.choice(n_total, size=int(0.8 * n_total), replace=False)
+            gmm_cv = GaussianMixture(
+                n_components=n_components, covariance_type=covariance_type,
+                max_iter=cl_cfg.get("gmm_max_iter", 100),
+                n_init=cl_cfg.get("gmm_n_init", 3),
+                tol=cl_cfg.get("gmm_tol", 0.001),
+                random_state=self.random_state,
+            )
+            gmm_cv.fit(X_scaled[idx])
+            labels_cv = gmm_cv.predict(X_scaled)
+            try:
+                cv_sil_list_gmm.append(
+                    silhouette_score(X_scaled, labels_cv) if n_components > 1 else np.nan
+                )
+            except Exception:
+                cv_sil_list_gmm.append(np.nan)
+        cv_sil_mean = round(float(np.nanmean(cv_sil_list_gmm)), 4)
+        cv_sil_std  = round(float(np.nanstd(cv_sil_list_gmm)),  4)
+        logger.info(
+            f"[CLUSTER] GMM subsampling CV ({cv_n_splits}x) | "
+            f"Silhouette={cv_sil_mean}±{cv_sil_std}"
+        )
+
+        _append_summary({
+            "dataset": dataset_name, "task": "clustering", "algorithm": "gaussian_mixture",
+            "n_clusters": n_components,
+            "silhouette_score": round(float(sil), 4) if not np.isnan(sil) else "",
+            "cv_silhouette_mean": cv_sil_mean, "cv_silhouette_std": cv_sil_std,
+        })
+        from src.infrastructure import tracker
+        tracker.log_run(
+            config,
+            run_name=f"{dataset_name}/gaussian_mixture",
+            params={"algorithm": "gaussian_mixture", "n_components": n_components},
+            metrics={
+                "silhouette_score":   round(float(sil), 4) if not np.isnan(sil) else 0.0,
+                "cv_silhouette_mean": cv_sil_mean,
+                "cv_silhouette_std":  cv_sil_std,
+            },
+            tags={"task": "clustering", "dataset": dataset_name},
+        )
+        return {
+            "n_clusters": n_components, "silhouette_score": sil,
+            "cv_silhouette_mean": cv_sil_mean, "cv_silhouette_std": cv_sil_std,
+        }
 
 
 def run_clustering(df: pd.DataFrame, dataset_name: str, config: dict) -> dict:

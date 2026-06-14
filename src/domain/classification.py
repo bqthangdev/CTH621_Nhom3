@@ -13,6 +13,7 @@ from typing import Optional
 import joblib
 import numpy as np
 import pandas as pd
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     accuracy_score,
@@ -21,9 +22,18 @@ from sklearn.metrics import (
     precision_score,
     recall_score,
 )
-from sklearn.model_selection import train_test_split
+from sklearn.base import clone
+from sklearn.model_selection import StratifiedKFold, cross_validate, train_test_split
+from sklearn.naive_bayes import GaussianNB
+from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 from sklearn.tree import DecisionTreeClassifier
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import roc_curve, auc
 
 from src.infrastructure.logger import get_logger
 
@@ -34,13 +44,21 @@ SUMMARY_FIELDS = [
     "timestamp", "dataset", "task", "algorithm", "target_col",
     "split", "n_train", "n_test",
     "accuracy", "precision", "recall", "f1",
-    "mae", "rmse", "r2", "silhouette_score", "n_clusters", "notes",
+    "cv_accuracy_mean", "cv_accuracy_std", "cv_f1_mean", "cv_f1_std",
+    "mae", "rmse", "r2",
+    "cv_mae_mean", "cv_mae_std", "cv_rmse_mean", "cv_rmse_std", "cv_r2_mean", "cv_r2_std",
+    "silhouette_score", "cv_silhouette_mean", "cv_silhouette_std",
+    "n_clusters", "notes",
 ]
 
 ALGO_MAP = {
     "logistic": LogisticRegression,
     "decision_tree": DecisionTreeClassifier,
     "svm": SVC,
+    "random_forest": RandomForestClassifier,
+    "gradient_boosting": GradientBoostingClassifier,
+    "knn": KNeighborsClassifier,
+    "naive_bayes": GaussianNB,
 }
 
 
@@ -52,6 +70,94 @@ def _append_summary(row: dict) -> None:
         if write_header:
             writer.writeheader()
         writer.writerow(row)
+
+
+def _plot_confusion_matrix(
+    cm: np.ndarray, labels: list, algo: str, target_col: str, out_dir: str
+) -> None:
+    """Confusion matrix dạng heatmap — trực quan hóa số lượng TP/FP/TN/FN."""
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(max(5, len(labels) * 1.3), max(4, len(labels) * 1.1)))
+    sns.heatmap(
+        cm, annot=True, fmt="d", cmap="Blues", ax=ax,
+        xticklabels=labels, yticklabels=labels,
+        linewidths=0.5, linecolor="gray",
+        cbar_kws={"shrink": 0.8},
+    )
+    ax.set_title(f"Confusion Matrix — {algo} / {target_col}")
+    ax.set_xlabel("Predicted")
+    ax.set_ylabel("Actual")
+    plt.tight_layout()
+    path = os.path.join(out_dir, f"cm_{algo}_{target_col}.png")
+    fig.savefig(path, bbox_inches="tight", dpi=150)
+    plt.close(fig)
+    logger.info(f"[CLASSIFY] Confusion matrix → {path}")
+
+
+def _plot_roc_curve(
+    model, X_test: pd.DataFrame, y_test: pd.Series,
+    algo: str, target_col: str, out_dir: str
+) -> None:
+    """ROC/AUC curve cho phân loại nhị phân — đánh giá khả năng phân tách nhãn."""
+    if y_test.nunique() != 2:
+        return  # chỉ hỗ trợ binary
+    try:
+        if hasattr(model, "predict_proba"):
+            y_score = model.predict_proba(X_test)[:, 1]
+        elif hasattr(model, "decision_function"):
+            y_score = model.decision_function(X_test)
+        else:
+            return
+        fpr, tpr, _ = roc_curve(y_test, y_score)
+        roc_auc = auc(fpr, tpr)
+        fig, ax = plt.subplots(figsize=(6, 5))
+        ax.plot(fpr, tpr, color="#4C72B0", linewidth=2,
+                label=f"AUC = {roc_auc:.3f}")
+        ax.plot([0, 1], [0, 1], color="gray", linestyle="--", linewidth=1)
+        ax.fill_between(fpr, tpr, alpha=0.08, color="#4C72B0")
+        ax.set_xlim([0, 1]); ax.set_ylim([0, 1.02])
+        ax.set_xlabel("False Positive Rate")
+        ax.set_ylabel("True Positive Rate")
+        ax.set_title(f"ROC Curve — {algo} / {target_col}")
+        ax.legend(loc="lower right", fontsize=10)
+        plt.tight_layout()
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        path = os.path.join(out_dir, f"roc_{algo}_{target_col}.png")
+        fig.savefig(path, bbox_inches="tight", dpi=150)
+        plt.close(fig)
+        logger.info(f"[CLASSIFY] ROC curve (AUC={roc_auc:.3f}) → {path}")
+    except Exception as e:
+        logger.warning(f"[CLASSIFY] Bỏ qua ROC curve ({algo}/{target_col}): {e}")
+
+
+def _plot_feature_importance(
+    model, feature_names: list, algo: str, target_col: str, out_dir: str
+) -> None:
+    """Feature importance bar chart — top-20 features có ảnh hưởng nhất đến dự báo."""
+    importances = None
+    if hasattr(model, "feature_importances_"):
+        importances = model.feature_importances_
+    elif hasattr(model, "coef_"):
+        coef = model.coef_
+        importances = np.abs(coef[0] if coef.ndim > 1 else coef)
+    if importances is None or len(importances) == 0:
+        return
+    n_show = min(20, len(feature_names))
+    indices = np.argsort(importances)[::-1][:n_show]
+    top_names = [feature_names[i] for i in indices]
+    top_vals  = importances[indices]
+    fig, ax = plt.subplots(figsize=(9, max(4, n_show * 0.42)))
+    ax.barh(range(n_show), top_vals[::-1], color="#4C72B0", edgecolor="black", height=0.7)
+    ax.set_yticks(range(n_show))
+    ax.set_yticklabels(top_names[::-1], fontsize=9)
+    ax.set_xlabel("Importance")
+    ax.set_title(f"Feature Importance — {algo} / {target_col} (Top {n_show})")
+    plt.tight_layout()
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    path = os.path.join(out_dir, f"feat_imp_{algo}_{target_col}.png")
+    fig.savefig(path, bbox_inches="tight", dpi=150)
+    plt.close(fig)
+    logger.info(f"[CLASSIFY] Feature importance → {path}")
 
 
 class ClassificationPipeline:
@@ -120,6 +226,14 @@ class ClassificationPipeline:
                 f"nhãn thiểu số chỉ chiếm {dist.min()*100:.1f}%"
             )
 
+        # Compute model path trước khi split — dùng để kiểm tra checkpoint
+        out_dir = os.path.join(
+            config.get("base_output_dir", "outputs"),
+            dataset_name, "models"
+        )
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        model_path = os.path.join(out_dir, f"clf_{self.algorithm}_{target_col}.joblib")
+
         stratify_y = y if stratify_flag else None
         X_train, X_test, y_train, y_test = train_test_split(
             X, y,
@@ -128,7 +242,15 @@ class ClassificationPipeline:
             stratify=stratify_y,
         )
 
-        self.model.fit(X_train, y_train)
+        # Resume từ checkpoint nếu model đã tồn tại — bỏ qua bước fit
+        if Path(model_path).exists():
+            logger.info(f"[CLASSIFY] Nạp model từ checkpoint → {model_path}")
+            self.model = joblib.load(model_path)
+        else:
+            self.model.fit(X_train, y_train)
+            joblib.dump(self.model, model_path)
+            logger.info(f"[CLASSIFY] Model đã lưu → {model_path}")
+
         y_pred = self.model.predict(X_test)
 
         acc = accuracy_score(y_test, y_pred)
@@ -143,15 +265,43 @@ class ClassificationPipeline:
         )
         logger.info(f"[CLASSIFY] Confusion Matrix:\n{cm}")
 
-        # Lưu model
-        out_dir = os.path.join(
+        # ── Trực quan hóa ────────────────────────────────────────────────────────
+        viz_dir = os.path.join(
             config.get("base_output_dir", "outputs"),
-            dataset_name, "models"
+            dataset_name, "ml", "classification"
         )
-        Path(out_dir).mkdir(parents=True, exist_ok=True)
-        model_path = os.path.join(out_dir, f"clf_{self.algorithm}_{target_col}.joblib")
-        joblib.dump(self.model, model_path)
-        logger.info(f"[CLASSIFY] Model đã lưu → {model_path}")
+        _plot_confusion_matrix(
+            cm, [str(l) for l in sorted(y.unique().tolist())],
+            self.algorithm, target_col, viz_dir
+        )
+        _plot_roc_curve(self.model, X_test, y_test, self.algorithm, target_col, viz_dir)
+        _plot_feature_importance(self.model, list(X.columns), self.algorithm, target_col, viz_dir)
+
+        # ── StratifiedKFold CV (song song với Hold-out) ───────────────────────────
+        n_splits = clf_cfg.get("cv_n_splits", 5)
+        cv_strategy = StratifiedKFold(
+            n_splits=n_splits, shuffle=True, random_state=self.random_state
+        )
+        cv_results = cross_validate(
+            clone(self.model), X, y,
+            cv=cv_strategy,
+            scoring={
+                "accuracy":  "accuracy",
+                "f1":        "f1_weighted",
+                "precision": "precision_weighted",
+                "recall":    "recall_weighted",
+            },
+            return_train_score=False,
+            error_score=0.0,
+        )
+        cv_acc_mean = round(float(np.mean(cv_results["test_accuracy"])), 4)
+        cv_acc_std  = round(float(np.std(cv_results["test_accuracy"])),  4)
+        cv_f1_mean  = round(float(np.mean(cv_results["test_f1"])),       4)
+        cv_f1_std   = round(float(np.std(cv_results["test_f1"])),        4)
+        logger.info(
+            f"[CLASSIFY] {n_splits}-Fold StratifiedKFold | "
+            f"Acc={cv_acc_mean}±{cv_acc_std} | F1={cv_f1_mean}±{cv_f1_std}"
+        )
 
         result = {
             "dataset": dataset_name,
@@ -161,12 +311,36 @@ class ClassificationPipeline:
             "split": f"train={1 - test_size:.0%}/test={test_size:.0%}",
             "n_train": len(X_train),
             "n_test": len(X_test),
-            "accuracy": round(acc, 4),
-            "precision": round(prec, 4),
-            "recall": round(rec, 4),
-            "f1": round(f1, 4),
+            "accuracy":         round(acc, 4),
+            "precision":        round(prec, 4),
+            "recall":           round(rec, 4),
+            "f1":               round(f1, 4),
+            "cv_accuracy_mean": cv_acc_mean,
+            "cv_accuracy_std":  cv_acc_std,
+            "cv_f1_mean":       cv_f1_mean,
+            "cv_f1_std":        cv_f1_std,
         }
         _append_summary(result)
+        from src.infrastructure import tracker
+        tracker.log_run(
+            config,
+            run_name=f"{dataset_name}/{self.algorithm}/{target_col}",
+            params={
+                "algorithm": self.algorithm,
+                "target_col": target_col,
+                "test_size": test_size,
+                "cv_n_splits": n_splits,
+            },
+            metrics={
+                "accuracy":         round(acc, 4),
+                "precision":        round(prec, 4),
+                "recall":           round(rec, 4),
+                "f1":               round(f1, 4),
+                "cv_accuracy_mean": cv_acc_mean,
+                "cv_f1_mean":       cv_f1_mean,
+            },
+            tags={"task": "classification", "dataset": dataset_name},
+        )
         return result
 
 

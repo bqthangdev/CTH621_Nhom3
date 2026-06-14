@@ -203,6 +203,86 @@ def plot_timeseries(df: pd.DataFrame, out_dir: str) -> None:
         _savefig(fig, os.path.join(out_dir, f"timeseries_{col}.png"))
 
 
+def plot_correlation_heatmap(df: pd.DataFrame, quant_cols: list, out_dir: str) -> None:
+    """Correlation heatmap giữa các biến định lượng — phát hiện đa cộng tuyến."""
+    cols = [c for c in quant_cols if c in df.columns][:20]  # giới hạn 20 cột
+    if len(cols) < 2:
+        return
+    corr = df[cols].corr()
+    n = len(cols)
+    fig, ax = plt.subplots(figsize=(max(8, n * 0.75), max(6, n * 0.65)))
+    mask = np.triu(np.ones_like(corr, dtype=bool))  # chỉ hiện nửa dưới tam giác
+    sns.heatmap(
+        corr, mask=mask, ax=ax,
+        annot=(n <= 12), fmt=".2f", annot_kws={"size": 7},
+        cmap="coolwarm", center=0, vmin=-1, vmax=1,
+        linewidths=0.3, square=True,
+    )
+    ax.set_title("Correlation Heatmap")
+    plt.xticks(rotation=45, ha="right")
+    plt.yticks(rotation=0)
+    _savefig(fig, os.path.join(out_dir, "correlation_heatmap.png"))
+
+
+def plot_null_heatmap(df: pd.DataFrame, out_dir: str) -> None:
+    """Heatmap trực quan hóa vị trí giá trị null (chỉ vẽ khi có null)."""
+    null_count = df.isnull().sum()
+    cols_with_null = null_count[null_count > 0].index.tolist()
+    if not cols_with_null:
+        return
+    sample = df[cols_with_null].isnull()
+    if len(sample) > 300:
+        sample = sample.sample(300, random_state=42)
+    fig, ax = plt.subplots(figsize=(max(6, len(cols_with_null) * 0.9), 5))
+    sns.heatmap(sample, cbar=False, ax=ax, cmap=["#4C72B0", "#f0f0f0"], yticklabels=False)
+    ax.set_title("Missing Values Map  (xanh = có dữ liệu, trắng = null)")
+    ax.set_xlabel("Cột")
+    plt.xticks(rotation=45, ha="right")
+    _savefig(fig, os.path.join(out_dir, "null_heatmap.png"))
+
+
+def plot_class_distribution(df: pd.DataFrame, target_cols: list, out_dir: str) -> None:
+    """Bar chart phân phối nhãn từng cột mục tiêu — phát hiện class imbalance."""
+    for col in target_cols:
+        if col not in df.columns:
+            continue
+        freq = df[col].value_counts().sort_index()
+        pct  = df[col].value_counts(normalize=True).sort_index() * 100
+        n_classes = len(freq)
+        palette = sns.color_palette("tab10", n_classes)
+
+        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+        # Count
+        bars = axes[0].bar(freq.index.astype(str), freq.values,
+                           color=palette, edgecolor="black")
+        for bar, v in zip(bars, freq.values):
+            axes[0].text(bar.get_x() + bar.get_width() / 2,
+                         bar.get_height() + max(freq) * 0.01,
+                         f"{v:,}", ha="center", va="bottom", fontsize=9)
+        axes[0].set_title(f"Class Distribution — {col} (count)")
+        axes[0].set_xlabel("Class")
+        axes[0].set_ylabel("Số lượng")
+
+        # Percentage + đường ngưỡng 10%
+        bars2 = axes[1].bar(pct.index.astype(str), pct.values,
+                            color=palette, edgecolor="black")
+        for bar, v in zip(bars2, pct.values):
+            axes[1].text(bar.get_x() + bar.get_width() / 2,
+                         bar.get_height() + 1,
+                         f"{v:.1f}%", ha="center", va="bottom", fontsize=9)
+        axes[1].axhline(10, color="red", linestyle="--", linewidth=1.2,
+                        label="Ngưỡng 10% imbalance")
+        axes[1].set_title(f"Class Distribution — {col} (%)")
+        axes[1].set_xlabel("Class")
+        axes[1].set_ylabel("Tỉ lệ (%)")
+        axes[1].set_ylim(0, min(110, max(pct.values) * 1.25))
+        axes[1].legend(fontsize=8)
+
+        plt.tight_layout()
+        _savefig(fig, os.path.join(out_dir, f"class_dist_{col}.png"))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. Pipeline tiền xử lý
 # ─────────────────────────────────────────────────────────────────────────────
@@ -220,9 +300,17 @@ def _fill_nulls_group_a(df: pd.DataFrame, var_types: dict) -> pd.DataFrame:
     return df
 
 
-def _cap_outliers_iqr(df: pd.DataFrame, quant_cols: list, multiplier: float = 1.5) -> pd.DataFrame:
+def _cap_outliers_iqr(
+    df: pd.DataFrame,
+    quant_cols: list,
+    multiplier: float = 1.5,
+    exclude: Optional[list] = None,
+) -> pd.DataFrame:
     df = df.copy()
+    skip = set(exclude or [])
     for col in quant_cols:
+        if col in skip:
+            continue
         q1, q3 = df[col].quantile(0.25), df[col].quantile(0.75)
         iqr = q3 - q1
         lower, upper = q1 - multiplier * iqr, q3 + multiplier * iqr
@@ -230,9 +318,17 @@ def _cap_outliers_iqr(df: pd.DataFrame, quant_cols: list, multiplier: float = 1.
     return df
 
 
-def _normalize(df: pd.DataFrame, quant_cols: list, method: str = "min-max") -> pd.DataFrame:
+def _normalize(
+    df: pd.DataFrame,
+    quant_cols: list,
+    method: str = "min-max",
+    exclude: Optional[list] = None,
+) -> pd.DataFrame:
     df = df.copy()
+    skip = set(exclude or [])
     for col in quant_cols:
+        if col in skip:
+            continue
         if method == "min-max":
             mn, mx = df[col].min(), df[col].max()
             if mx != mn:
@@ -285,6 +381,14 @@ def run_eda_pipeline(
         Path(d).mkdir(parents=True, exist_ok=True)
 
     eda_cfg = config.get("eda", {})
+    ds_cfg = (config.get("datasets") or {}).get(dataset_name, {})
+
+    # ── Drop columns không cần thiết (ví dụ: id) ────────────────────────────
+    drop_cols = ds_cfg.get("drop_columns", [])
+    if drop_cols:
+        existing_drop = [c for c in drop_cols if c in df.columns]
+        df = df.drop(columns=existing_drop)
+        logger.info(f"[EDA] Đã drop {len(existing_drop)} cột: {existing_drop}")
     var_types = classify_variables(df)
     quant_cols = var_types["quantitative_continuous"] + var_types["quantitative_discrete"]
 
@@ -300,6 +404,11 @@ def run_eda_pipeline(
     df.to_csv(os.path.join(raw_dir, "data_raw.csv"), index=(group == "B"))
 
     plot_boxplots(df, quant_cols, raw_dir)
+    plot_correlation_heatmap(df, quant_cols, raw_dir)
+    plot_null_heatmap(df, raw_dir)
+    _protect = ds_cfg.get("protect_columns", [])
+    if _protect:
+        plot_class_distribution(df, _protect, raw_dir)
     if group == "B":
         plot_timeseries(df, raw_dir)
 
@@ -313,12 +422,28 @@ def run_eda_pipeline(
 
     if group == "A":
         df_t = _fill_nulls_group_a(df, var_types)
+        protect_cols = ds_cfg.get("protect_columns", [])
         outlier_method = eda_cfg.get("outlier_method", "iqr-cap")
         iqr_mult = eda_cfg.get("iqr_multiplier", 1.5)
         if outlier_method == "iqr-cap":
-            df_t = _cap_outliers_iqr(df_t, quant_cols, multiplier=iqr_mult)
+            df_t = _cap_outliers_iqr(df_t, quant_cols, multiplier=iqr_mult, exclude=protect_cols)
         norm_method = eda_cfg.get("normalization", "min-max")
-        df_t = _normalize(df_t, quant_cols, method=norm_method)
+        df_t = _normalize(df_t, quant_cols, method=norm_method, exclude=protect_cols)
+        if protect_cols:
+            logger.info(f"[EDA] Bảo vệ {len(protect_cols)} cột khỏi cap/normalize: {protect_cols}")
+
+        # One-hot encode categorical columns nếu encode_categoricals = true
+        if ds_cfg.get("encode_categoricals", False):
+            qual_cols = classify_variables(df_t)["qualitative"]
+            if qual_cols:
+                df_t = pd.get_dummies(df_t, columns=qual_cols, drop_first=False)
+                # Ép các cột bool mới về int để tương thích downstream
+                bool_cols = df_t.select_dtypes(include="bool").columns.tolist()
+                df_t[bool_cols] = df_t[bool_cols].astype(int)
+                logger.info(
+                    f"[EDA] One-hot encoded {len(qual_cols)} cột → "
+                    f"shape sau encode: {df_t.shape}"
+                )
     else:  # Group B & C
         df_t = _fill_nulls_group_b(df)
         transforms = eda_cfg.get("group_b_transforms", [])
@@ -346,6 +471,7 @@ def run_eda_pipeline(
         plot_bar_charts(df_t, var_types_t["qualitative"], trans_dir)
     elif group == "B":
         plot_timeseries(df_t, trans_dir)
+    plot_correlation_heatmap(df_t, quant_cols_t, trans_dir)
 
     logger.info(f"[EDA] Hoàn thành — {dataset_name}")
     return df_t

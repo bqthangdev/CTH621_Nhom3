@@ -22,7 +22,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from src.infrastructure.checkpoint import is_done, mark_done, mark_failed
+from src.infrastructure.checkpoint import init_checkpoint, is_done, mark_done, mark_failed
 from src.infrastructure.logger import get_logger
 
 
@@ -280,6 +280,13 @@ def main() -> None:
     global logger
     logger = get_logger("run_pipeline", level=log_level)
     logger.info(f"[START] task={args.task} | dataset={args.dataset} | config={args.config}")
+
+    # Khởi tạo đường dẫn progress.json theo base_data_dir (hỗ trợ shared drive)
+    init_checkpoint(config.get("base_data_dir", "."))
+    logger.info(
+        f"[CHECKPOINT] progress.json → "
+        f"{config.get('base_data_dir', '.')}/progress.json"
+    )
 
     # Kiểm tra môi trường khi khởi động
     validate_environment()

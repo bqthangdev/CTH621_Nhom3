@@ -10,19 +10,34 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-PROGRESS_FILE = "progress.json"
+_PROGRESS_FILE = "progress.json"
+
+
+def init_checkpoint(base_dir: str = ".") -> None:
+    """
+    Khởi tạo đường dẫn progress.json dựa theo base_dir từ params.yaml.
+    Gọi một lần trong main() sau khi nạp config, trước khi chạy bất kỳ bước nào.
+    Cho phép trỏ vào thư mục đồng bộ chung (Google Drive, OneDrive) để
+    các thành viên chia sẻ trạng thái pipeline.
+
+    Args:
+        base_dir: Thư mục gốc chứa progress.json (ví dụ: "data" hoặc đường dẫn Drive).
+    """
+    global _PROGRESS_FILE
+    Path(base_dir).mkdir(parents=True, exist_ok=True)
+    _PROGRESS_FILE = str(Path(base_dir) / "progress.json")
 
 
 def load_progress() -> dict:
     """Nạp toàn bộ trạng thái từ progress.json. Trả về {} nếu chưa có file."""
-    if Path(PROGRESS_FILE).exists():
-        with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
+    if Path(_PROGRESS_FILE).exists():
+        with open(_PROGRESS_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     return {}
 
 
 def _save_progress(progress: dict) -> None:
-    with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
+    with open(_PROGRESS_FILE, "w", encoding="utf-8") as f:
         json.dump(progress, f, indent=2, ensure_ascii=False)
 
 
