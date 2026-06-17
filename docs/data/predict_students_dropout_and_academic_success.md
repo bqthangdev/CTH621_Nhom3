@@ -3,11 +3,11 @@
 #### 2.1.3.1 Giới thiệu Tập dữ liệu
 
 **Tên tập dữ liệu:** Predict Students' Dropout and Academic Success  
-**Nguồn chính:** UCI Machine Learning Repository — [https://archive.ics.uci.edu/dataset/697/predict+students+dropout+and+academic+success](https://archive.ics.uci.edu/dataset/697/predict+students+dropout+and+academic+success)  
-**Kho dữ liệu gốc:** Zenodo — [https://doi.org/10.5281/zenodo.5777340](https://doi.org/10.5281/zenodo.5777340)  
+**Nguồn tải về:** Kaggle — [https://www.kaggle.com/datasets/thedevastator/higher-education-predictors-of-student-retention](https://www.kaggle.com/datasets/thedevastator/higher-education-predictors-of-student-retention)  
+**Nguồn gốc:** Zenodo — [https://doi.org/10.5281/zenodo.5777340](https://doi.org/10.5281/zenodo.5777340)  
 **Nhóm nghiên cứu tạo lập:** Valentim Realinho, Jorge Machado, Luís Baptista, Mónica V. Martins — Instituto Politécnico de Portalegre, Bồ Đào Nha  
 **Năm công bố dữ liệu:** 2021  
-**Giấy phép:** CC BY 4.0 (Creative Commons Attribution 4.0 International)  
+**Giấy phép:** CC0 1.0 Universal (CC0 1.0) — Public Domain Dedication  
 **Bản chất dữ liệu:** Dữ liệu thực (Real-world Data) — thu thập từ nhiều cơ sở dữ liệu nội bộ tại một cơ sở giáo dục đại học ở Bồ Đào Nha  
 **Nhiệm vụ học máy:** Phân loại đa lớp (Multi-class Classification) — 3 lớp  
 **Biến mục tiêu:** `Target` — `"Dropout"`, `"Enrolled"`, `"Graduate"`
