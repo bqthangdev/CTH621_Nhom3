@@ -72,6 +72,114 @@ def validate_environment(requirements_file: str = "requirements.txt") -> None:
 # Task Runners
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _load_group_c_dataframe(dataset_name: str, config: dict):
+    """Load a multimedia dataset and return lightweight metadata as a DataFrame."""
+    import pandas as pd
+    from src.data.loader import load_audio, load_images, load_text, load_video
+    from src.data.validator import validate_group_c
+
+    ds_cfg = config.get("datasets", {}).get(dataset_name, {})
+    subtype = ds_cfg.get("subtype")
+
+    if subtype == "image":
+        items = load_images(ds_cfg.get("dir", ""))
+    elif subtype == "audio":
+        try:
+            items = load_audio(ds_cfg.get("dir", ""))
+        except ImportError as exc:
+            import wave
+
+            logger.warning(f"[LOAD] {exc}. Falling back to WAV metadata only.")
+            audio_dir = Path(ds_cfg.get("dir", ""))
+            if not audio_dir.exists():
+                raise FileNotFoundError(f"Thư mục audio không tồn tại: {audio_dir}")
+            items = []
+            for audio_path in audio_dir.rglob("*.wav"):
+                sample_rate = 0
+                duration = 0.0
+                try:
+                    with wave.open(str(audio_path), "rb") as wav:
+                        sample_rate = wav.getframerate()
+                        frames = wav.getnframes()
+                        duration = frames / sample_rate if sample_rate else 0.0
+                except wave.Error as wave_exc:
+                    logger.warning(f"[LOAD] Bỏ qua audio lỗi {audio_path}: {wave_exc}")
+                    continue
+                items.append({
+                    "path": str(audio_path),
+                    "label": audio_path.parent.name,
+                    "sample_rate": sample_rate,
+                    "duration": duration,
+                    "file_size_bytes": audio_path.stat().st_size,
+                })
+    elif subtype == "video":
+        items = load_video(ds_cfg.get("dir", ""))
+    elif subtype == "text":
+        df = load_text(
+            ds_cfg.get("file", ""),
+            text_col=ds_cfg.get("text_col"),
+            label_col=ds_cfg.get("label_col"),
+        )
+        validate_group_c(df, subtype, config)
+        return df
+    else:
+        raise ValueError(f"Subtype Group C không hợp lệ cho '{dataset_name}': {subtype}")
+
+    validate_group_c(items, subtype, config)
+    rows = [
+        {k: v for k, v in item.items() if k not in {"array", "waveform"}}
+        for item in items
+    ]
+    df = pd.DataFrame(rows)
+
+    metadata_files = ds_cfg.get("metadata_files", [])
+    if metadata_files and "path" in df.columns:
+        meta_frames = []
+        for meta_file in metadata_files:
+            meta_path = Path(meta_file)
+            if meta_path.exists():
+                meta_frames.append(pd.read_csv(meta_path))
+            else:
+                logger.warning(f"[LOAD] Metadata file không tồn tại: {meta_file}")
+
+        if meta_frames:
+            base_dir = Path(ds_cfg.get("dir", "."))
+            if not base_dir.is_absolute():
+                base_dir = ROOT / base_dir
+            base_dir = base_dir.resolve()
+
+            def _relative_media_path(path_value: str) -> str:
+                media_path = Path(path_value)
+                if not media_path.is_absolute():
+                    media_path = ROOT / media_path
+                try:
+                    return media_path.resolve().relative_to(base_dir).as_posix()
+                except ValueError:
+                    return str(path_value).replace("\\", "/")
+
+            metadata = pd.concat(meta_frames, ignore_index=True)
+            if "fname" in metadata.columns:
+                metadata = metadata.copy()
+                df = df.copy()
+                metadata.loc[:, "fname"] = metadata["fname"].astype(str).str.replace("\\", "/", regex=False)
+                df.loc[:, "fname"] = df["path"].map(_relative_media_path)
+                merge_cols = [
+                    c for c in ["fname", "dataset", "label", "sublabel"]
+                    if c in metadata.columns
+                ]
+                df = df.drop(
+                    columns=[c for c in merge_cols if c != "fname" and c in df.columns],
+                    errors="ignore",
+                )
+                df = df.merge(metadata[merge_cols], on="fname", how="left")
+
+    if "label" in df.columns and df["label"].isna().any() and "path" in df.columns:
+        fallback = df["path"].map(lambda p: Path(str(p)).stem.split("__", 1)[0])
+        df.loc[:, "label"] = df["label"].fillna(fallback)
+
+    return df
+
+
 def run_eda_task(dataset_name: str, config: dict) -> None:
     """Chạy EDA pipeline cho một dataset."""
     from src.data.loader import load_tabular, load_timeseries
@@ -95,8 +203,8 @@ def run_eda_task(dataset_name: str, config: dict) -> None:
             df = load_timeseries(file_path, datetime_col)
             validate_group_b(df, config)
         else:
-            logger.error(f"[EDA] Nhóm C không hỗ trợ qua CLI task 'eda'. Dùng notebook.")
-            return
+            df = _load_group_c_dataframe(dataset_name, config)
+            logger.info(f"[EDA] Group C metadata loaded via CLI — {dataset_name}")
 
         run_eda_pipeline(df, dataset_name, group, config)
         mark_done(dataset_name, "eda")
@@ -184,7 +292,10 @@ def run_clustering_task(dataset_name: str, config: dict) -> None:
             df = pd.read_parquet(interim_path)
         else:
             ds_cfg = config.get("datasets", {}).get(dataset_name, {})
-            df = pd.read_csv(ds_cfg.get("file", ""))
+            if ds_cfg.get("type") == "C":
+                df = _load_group_c_dataframe(dataset_name, config)
+            else:
+                df = pd.read_csv(ds_cfg.get("file", ""))
 
         run_clustering(df, dataset_name, config)
         mark_done(dataset_name, step)

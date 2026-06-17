@@ -166,24 +166,24 @@ class ClassificationPipeline:
     Nhận **kwargs để map toàn bộ hyperparameter từ params.yaml vào estimator.
     """
 
-    def __init__(self, algorithm: str, random_state: int, **kwargs):
+    def __init__(self, algo_name: str, random_state: int, **kwargs):
         """
         Args:
             algorithm:    Tên thuật toán: "logistic" | "decision_tree" | "svm".
             random_state: Đọc từ params.yaml — KHÔNG hardcode.
             **kwargs:     Hyperparameter bổ sung từ params.yaml.
         """
-        if algorithm not in ALGO_MAP:
+        if algo_name not in ALGO_MAP:
             raise ValueError(
-                f"Thuật toán '{algorithm}' không hợp lệ. Chọn: {list(ALGO_MAP.keys())}"
+                f"Thuật toán '{algo_name}' không hợp lệ. Chọn: {list(ALGO_MAP.keys())}"
             )
-        EstimatorClass = ALGO_MAP[algorithm]
+        EstimatorClass = ALGO_MAP[algo_name]
         # Chỉ truyền random_state nếu estimator hỗ trợ
         try:
             self.model = EstimatorClass(random_state=random_state, **kwargs)
         except TypeError:
             self.model = EstimatorClass(**kwargs)
-        self.algorithm = algorithm
+        self.algorithm = algo_name
         self.random_state = random_state
 
     def run(
@@ -246,6 +246,8 @@ class ClassificationPipeline:
         if Path(model_path).exists():
             logger.info(f"[CLASSIFY] Nạp model từ checkpoint → {model_path}")
             self.model = joblib.load(model_path)
+            if hasattr(self.model, "n_jobs"):
+                self.model.set_params(n_jobs=1)
         else:
             self.model.fit(X_train, y_train)
             joblib.dump(self.model, model_path)

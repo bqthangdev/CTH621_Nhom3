@@ -74,3 +74,4 @@ progress.json
 
 # ── QUAN TRỌNG: Không bao giờ ignore .gitkeep ─────────────────
 !**/.gitkeep
+data/raw/timeseri/har70plus/har70plus_merged.csv

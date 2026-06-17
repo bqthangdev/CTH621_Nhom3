@@ -54,11 +54,11 @@ def build_lag_features(df: pd.DataFrame, target_col: str, lags: list, rolling_wi
     Returns:
         DataFrame đã thêm các cột lag và rolling, đã dropna.
     """
-    df = df.copy()
+    df = df.copy(deep=True)
     for lag in lags:
-        df[f"lag_{lag}"] = df[target_col].shift(lag)
+        df.loc[:, f"lag_{lag}"] = df[target_col].shift(lag)
     for w in rolling_windows:
-        df[f"rolling_mean_{w}"] = df[target_col].rolling(w).mean()
+        df.loc[:, f"rolling_mean_{w}"] = df[target_col].rolling(w).mean()
     df = df.dropna()
     return df
 

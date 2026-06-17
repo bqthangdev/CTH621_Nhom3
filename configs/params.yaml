@@ -302,6 +302,49 @@ datasets:
       dbscan_eps: 0.8
       dbscan_min_samples: 5
 
+  # Group A: additional tabular datasets
+  higher_education_predictors_of_student_retention:
+    type: "A"
+    file: "data/raw/tabular/higher_education_predictors_of_student_retention/dataset.csv"
+    encode_categoricals: false
+    protect_columns: ["Target"]
+    classification:
+      target_columns: ["Target"]
+      test_size: 0.2
+      stratify: true
+      cv_n_splits: 5
+      algorithms:
+        logistic:
+          C: 1.0
+          max_iter: 3000
+          solver: "lbfgs"
+          class_weight: "balanced"
+        decision_tree:
+          max_depth: 8
+          min_samples_split: 20
+          min_samples_leaf: 8
+          class_weight: "balanced"
+        random_forest:
+          n_estimators: 200
+          max_depth: 12
+          min_samples_leaf: 4
+          n_jobs: 1
+          class_weight: "balanced"
+        gradient_boosting:
+          n_estimators: 150
+          max_depth: 3
+          learning_rate: 0.05
+          subsample: 0.8
+        knn:
+          n_neighbors: 7
+          weights: "distance"
+    clustering:
+      label_columns: ["Target"]
+      max_k: 8
+      n_clusters: 3
+      dbscan_eps: 3.0
+      dbscan_min_samples: 10
+
   # ── Group B: Dữ liệu chuỗi thời gian ────────────────────────────────────
   pgcb_hourly_generation:
     type: "B"
@@ -375,7 +418,55 @@ datasets:
       dbscan_eps: 0.5
       dbscan_min_samples: 100      # Dataset rất lớn (2.2M rows) — min_samples cao
 
+  # Group B: additional time-series datasets
+  dow_jones_index:
+    type: "B"
+    file: "data/raw/timeseri/dow_jones_index/dow_jones_index.data"
+    datetime_col: "date"
+    target_col: "percent_change_next_weeks_price"
+    drop_columns:
+      - "stock"
+      - "open"
+      - "high"
+      - "low"
+      - "close"
+      - "next_weeks_open"
+      - "next_weeks_close"
+    regression:
+      train_ratio: 0.8
+      lags: [1, 2, 4]
+      rolling_windows: [2, 4]
+      cv_n_splits: 5
+      algorithms:
+        linear_regression:
+          fit_intercept: true
+        ridge:
+          alpha: 1.0
+          fit_intercept: true
+        lasso:
+          alpha: 0.01
+          max_iter: 3000
+        random_forest_regressor:
+          n_estimators: 100
+          max_depth: 6
+          min_samples_leaf: 5
+          n_jobs: 1
+        xgboost:
+          n_estimators: 100
+          max_depth: 3
+          learning_rate: 0.05
+          subsample: 0.8
+          colsample_bytree: 0.8
+          early_stopping_rounds: 10
+    clustering:
+      label_columns: ["percent_change_next_weeks_price"]
+      max_k: 8
+      n_clusters: 4
+      dbscan_eps: 1.2
+      dbscan_min_samples: 10
+
   # ── Group C: Dữ liệu đa phương tiện ─────────────────────────────────────
+  # Group C: multimedia datasets
   realwaste:
     type: "C"
     subtype: "image"
@@ -384,5 +475,19 @@ datasets:
       label_columns: ["label"]
       max_k: 10
       n_clusters: 9                # 9 lớp rác thải — khớp với số thư mục
+      dbscan_eps: 0.5
+      dbscan_min_samples: 5
+
+  heartbeat_sounds:
+    type: "C"
+    subtype: "audio"
+    dir: "data/raw/audio/heartbeat_sounds"
+    metadata_files:
+      - "data/raw/audio/heartbeat_sounds/set_a.csv"
+      - "data/raw/audio/heartbeat_sounds/set_b.csv"
+    clustering:
+      label_columns: ["dataset", "fname", "path", "label", "sublabel"]
+      max_k: 8
+      n_clusters: 4
       dbscan_eps: 0.5
       dbscan_min_samples: 5
