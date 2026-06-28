@@ -44,6 +44,8 @@ eda:
   normalization: "min-max"   # "min-max" or "z-score"
   outlier_method: "iqr-cap"  # "iqr-cap" or "remove"
   iqr_multiplier: 1.5
+  excel_max_rows: 1048576
+  excel_sample_rows: 100000
   group_b_transforms:
     - "forward_fill"
     - "linear_interpolation"
@@ -169,6 +171,8 @@ regression:
 # ============================================================
 clustering:
   scaler: "standard"              # "standard" | "minmax"
+  silhouette_max_samples: 10000
+  plot_max_samples: 100000        # giới hạn số điểm khi vẽ scatter PCA cho dataset lớn
   cv_n_splits: 5                  # Số vòng subsampling CV để đánh giá độ ổn định silhouette
   # ── K-Means ──────────────────────────────────────────────────────────────
   max_k: 10                       # duyệt K từ 2 → max_k để tìm K tối ưu
@@ -178,14 +182,18 @@ clustering:
   # ── Hierarchical ─────────────────────────────────────────────────────────
   n_clusters: 3
   linkage_method: "ward"          # ward | complete | average | single
+  hierarchical_max_samples: 5000
   hierarchical_metric: "euclidean" # euclidean | cosine | manhattan (ward chỉ dùng euclidean)
   # ── DBSCAN ───────────────────────────────────────────────────────────────
   dbscan_eps: 0.5                 # bán kính vùng lân cận — nhỏ → nhiều outlier
   dbscan_min_samples: 5           # số điểm tối thiểu để tạo cụm — lớn → nhiều outlier
+  dbscan_max_samples: 100000      # giới hạn mẫu cho DBSCAN trên dataset lớn để tránh quá tải RAM
   dbscan_metric: "euclidean"      # euclidean | cosine | manhattan
   # ── Gaussian Mixture Model ───────────────────────────────────────────────
   gmm_n_components: 3
   gmm_covariance_type: "full"     # full | tied | diag | spherical
+  gmm_fit_max_samples: 200000     # fit GMM trên mẫu, sau đó predict lại toàn bộ nếu cần
+  gmm_cv_max_samples: 100000      # giới hạn mẫu mỗi vòng CV của GMM
   gmm_max_iter: 100               # vòng lặp EM tối đa
   gmm_n_init: 3                   # số lần khởi tạo ngẫu nhiên — nhiều hơn → ổn định hơn
   gmm_tol: 0.001                  # ngưỡng hội tụ log-likelihood
@@ -417,6 +425,10 @@ datasets:
       n_clusters: 7                # 7 hoạt động khác nhau trong dataset
       dbscan_eps: 0.5
       dbscan_min_samples: 100      # Dataset rất lớn (2.2M rows) — min_samples cao
+      dbscan_max_samples: 50000
+      gmm_fit_max_samples: 100000
+      gmm_cv_max_samples: 50000
+      plot_max_samples: 50000
 
   # Group B: additional time-series datasets
   dow_jones_index:

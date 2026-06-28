@@ -108,18 +108,45 @@ def load_images(dir_path: str, extensions: tuple = (".jpg", ".jpeg", ".png", ".b
     ]
     logger.info(f"[LOAD] Images — tìm thấy {len(image_files)} file trong {dir_path}")
 
+    def _image_features(arr: np.ndarray) -> dict:
+        arr_float = arr.astype("float32") / 255.0
+        gray = (
+            0.299 * arr_float[:, :, 0]
+            + 0.587 * arr_float[:, :, 1]
+            + 0.114 * arr_float[:, :, 2]
+        )
+        edge_y = np.abs(np.diff(gray, axis=0)).mean() if gray.shape[0] > 1 else 0.0
+        edge_x = np.abs(np.diff(gray, axis=1)).mean() if gray.shape[1] > 1 else 0.0
+
+        features = {
+            "brightness_mean": float(gray.mean()),
+            "brightness_std": float(gray.std()),
+            "edge_density": float(edge_x + edge_y),
+        }
+        for idx, channel in enumerate(("red", "green", "blue")):
+            values = arr_float[:, :, idx]
+            features[f"{channel}_mean"] = float(values.mean())
+            features[f"{channel}_std"] = float(values.std())
+            hist, _ = np.histogram(values, bins=8, range=(0.0, 1.0), density=False)
+            hist = hist.astype("float32") / max(1, hist.sum())
+            for bin_idx, value in enumerate(hist):
+                features[f"{channel}_hist_{bin_idx}"] = float(value)
+        return features
+
     for img_path in image_files:
         try:
             img = Image.open(img_path).convert("RGB")
             arr = np.array(img)
-            records.append({
+            record = {
                 "path": str(img_path),
                 "label": img_path.parent.name,
                 "width": img.width,
                 "height": img.height,
                 "channels": arr.shape[2] if arr.ndim == 3 else 1,
                 "array": arr,
-            })
+            }
+            record.update(_image_features(arr))
+            records.append(record)
         except Exception as e:
             logger.warning(f"[LOAD] Bỏ qua ảnh lỗi {img_path}: {e}")
 

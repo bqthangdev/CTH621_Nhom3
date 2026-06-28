@@ -351,6 +351,27 @@ def _fill_nulls_group_b(df: pd.DataFrame) -> pd.DataFrame:
 # 5. Hàm chính: run_eda_pipeline
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _export_dataframe(df: pd.DataFrame, out_dir: str, stem: str, group: str, eda_cfg: dict) -> None:
+    index = group == "B"
+    csv_path = os.path.join(out_dir, f"{stem}.csv")
+    xlsx_path = os.path.join(out_dir, f"{stem}.xlsx")
+    df.to_csv(csv_path, index=index)
+
+    excel_max_rows = int(eda_cfg.get("excel_max_rows", 1_048_576))
+    excel_sample_rows = int(eda_cfg.get("excel_sample_rows", 100_000))
+    if len(df) <= excel_max_rows:
+        df.to_excel(xlsx_path, index=index)
+        return
+
+    sample_n = min(excel_sample_rows, len(df), excel_max_rows)
+    sample_path = os.path.join(out_dir, f"{stem}_sample.xlsx")
+    df.head(sample_n).to_excel(sample_path, index=index)
+    logger.warning(
+        f"[EDA] {stem}.xlsx skipped because {len(df)} rows exceed Excel limit "
+        f"{excel_max_rows}. Wrote CSV and {sample_n}-row Excel sample instead."
+    )
+
+
 def run_eda_pipeline(
     df: pd.DataFrame,
     dataset_name: str,
@@ -400,8 +421,7 @@ def run_eda_pipeline(
     null_report.to_csv(os.path.join(raw_dir, "null_report.csv"))
     logger.info(f"[EDA] Null report → {raw_dir}/null_report.csv")
 
-    df.to_excel(os.path.join(raw_dir, "data_raw.xlsx"), index=(group == "B"))
-    df.to_csv(os.path.join(raw_dir, "data_raw.csv"), index=(group == "B"))
+    _export_dataframe(df, raw_dir, "data_raw", group, eda_cfg)
 
     plot_boxplots(df, quant_cols, raw_dir)
     plot_correlation_heatmap(df, quant_cols, raw_dir)
@@ -453,8 +473,7 @@ def run_eda_pipeline(
             num_cols = df_t.select_dtypes(include="number").columns
             df_t[num_cols] = np.log1p(df_t[num_cols].clip(lower=0))
 
-    df_t.to_excel(os.path.join(trans_dir, "data_transformed.xlsx"), index=(group == "B"))
-    df_t.to_csv(os.path.join(trans_dir, "data_transformed.csv"), index=(group == "B"))
+    _export_dataframe(df_t, trans_dir, "data_transformed", group, eda_cfg)
     df_t.to_parquet(
         os.path.join(interim_dir, f"{dataset_name}_transformed.parquet"),
         index=(group == "B"),
