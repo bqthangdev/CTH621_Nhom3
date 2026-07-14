@@ -25,6 +25,8 @@ sys.path.insert(0, str(ROOT))
 from src.infrastructure.checkpoint import init_checkpoint, is_done, mark_done, mark_failed
 from src.infrastructure.logger import get_logger
 
+logger = get_logger("run_pipeline")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -87,6 +89,7 @@ def _load_group_c_dataframe(dataset_name: str, config: dict):
         try:
             items = load_audio(ds_cfg.get("dir", ""))
         except ImportError as exc:
+            import numpy as np
             import wave
 
             logger.warning(f"[LOAD] {exc}. Falling back to WAV metadata only.")
@@ -94,24 +97,83 @@ def _load_group_c_dataframe(dataset_name: str, config: dict):
             if not audio_dir.exists():
                 raise FileNotFoundError(f"Thư mục audio không tồn tại: {audio_dir}")
             items = []
+            def _wav_to_float(wav) -> tuple[np.ndarray, int]:
+                sample_rate = wav.getframerate()
+                channels = wav.getnchannels()
+                sample_width = wav.getsampwidth()
+                raw = wav.readframes(wav.getnframes())
+                if sample_width == 1:
+                    data = (np.frombuffer(raw, dtype=np.uint8).astype("float32") - 128.0) / 128.0
+                elif sample_width == 2:
+                    data = np.frombuffer(raw, dtype="<i2").astype("float32") / 32768.0
+                elif sample_width == 4:
+                    data = np.frombuffer(raw, dtype="<i4").astype("float32") / 2147483648.0
+                else:
+                    data = np.array([], dtype="float32")
+                if channels > 1 and data.size:
+                    data = data.reshape(-1, channels).mean(axis=1)
+                return data, sample_rate
+
+            def _audio_features(waveform: np.ndarray, sr: int) -> dict:
+                if waveform.size == 0 or sr <= 0:
+                    return {
+                        "rms_mean": 0.0,
+                        "rms_std": 0.0,
+                        "zero_crossing_rate": 0.0,
+                        "amplitude_mean": 0.0,
+                        "amplitude_std": 0.0,
+                        "amplitude_max": 0.0,
+                        "spectral_centroid_hz": 0.0,
+                        "spectral_bandwidth_hz": 0.0,
+                        "spectral_rolloff_85_hz": 0.0,
+                    }
+                y = np.asarray(waveform, dtype="float32")
+                abs_y = np.abs(y)
+                rms = np.sqrt(np.mean(np.square(y)))
+                zcr = np.mean(np.abs(np.diff(np.signbit(y).astype("int8"))))
+                spectrum = np.abs(np.fft.rfft(y))
+                freqs = np.fft.rfftfreq(len(y), d=1.0 / sr)
+                total_energy = spectrum.sum()
+                if total_energy > 0:
+                    centroid = float((freqs * spectrum).sum() / total_energy)
+                    bandwidth = float(np.sqrt((((freqs - centroid) ** 2) * spectrum).sum() / total_energy))
+                    cumulative = np.cumsum(spectrum)
+                    rolloff_idx = int(np.searchsorted(cumulative, 0.85 * total_energy))
+                    rolloff = float(freqs[min(rolloff_idx, len(freqs) - 1)])
+                else:
+                    centroid = bandwidth = rolloff = 0.0
+                return {
+                    "rms_mean": float(rms),
+                    "rms_std": float(np.std(np.square(y))),
+                    "zero_crossing_rate": float(zcr),
+                    "amplitude_mean": float(abs_y.mean()),
+                    "amplitude_std": float(abs_y.std()),
+                    "amplitude_max": float(abs_y.max()),
+                    "spectral_centroid_hz": centroid,
+                    "spectral_bandwidth_hz": bandwidth,
+                    "spectral_rolloff_85_hz": rolloff,
+                }
+
             for audio_path in audio_dir.rglob("*.wav"):
                 sample_rate = 0
                 duration = 0.0
                 try:
                     with wave.open(str(audio_path), "rb") as wav:
-                        sample_rate = wav.getframerate()
-                        frames = wav.getnframes()
+                        waveform, sample_rate = _wav_to_float(wav)
+                        frames = len(waveform)
                         duration = frames / sample_rate if sample_rate else 0.0
                 except wave.Error as wave_exc:
                     logger.warning(f"[LOAD] Bỏ qua audio lỗi {audio_path}: {wave_exc}")
                     continue
-                items.append({
+                record = {
                     "path": str(audio_path),
                     "label": audio_path.parent.name,
                     "sample_rate": sample_rate,
                     "duration": duration,
                     "file_size_bytes": audio_path.stat().st_size,
-                })
+                }
+                record.update(_audio_features(waveform, sample_rate))
+                items.append(record)
     elif subtype == "video":
         items = load_video(ds_cfg.get("dir", ""))
     elif subtype == "text":

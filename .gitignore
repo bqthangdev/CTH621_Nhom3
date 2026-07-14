@@ -75,3 +75,11 @@ progress.json
 # ── QUAN TRỌNG: Không bao giờ ignore .gitkeep ─────────────────
 !**/.gitkeep
 data/raw/timeseri/har70plus/har70plus_merged.csv
+/outputs-bk-v1
+/docs/submit
+AGENTS.md
+/data/interim-bk-v1
+/docs/assignments
+data/progress-bk-v1.json
+summary_results-bk-v1.csv
+pipeline_run-bk-v1.log

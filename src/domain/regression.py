@@ -348,13 +348,28 @@ class RegressionPipeline:
                 **kwargs,
             )
             fit_params = {}
+            fit_train = train
             if early_stop:
-                fit_params = {
-                    "eval_set": [(test[feature_cols], test[target_col])],
-                    "verbose": False,
-                }
-                self.model.set_params(early_stopping_rounds=early_stop)
-            self.model.fit(train[feature_cols], train[target_col], **fit_params)
+                val_size = max(1, int(len(train) * 0.2))
+                if len(train) - val_size >= 1:
+                    fit_train = train.iloc[:-val_size]
+                    fit_val = train.iloc[-val_size:]
+                    fit_params = {
+                        "eval_set": [(fit_val[feature_cols], fit_val[target_col])],
+                        "verbose": False,
+                    }
+                    self.model.set_params(early_stopping_rounds=early_stop)
+                    logger.info(
+                        "[REGRESSION] XGBoost early stopping uses the latest "
+                        f"{len(fit_val)} rows from the training window; test set "
+                        "remains untouched."
+                    )
+                else:
+                    logger.warning(
+                        "[REGRESSION] Training window is too small for an internal "
+                        "XGBoost validation split; early stopping disabled."
+                    )
+            self.model.fit(fit_train[feature_cols], fit_train[target_col], **fit_params)
             joblib.dump(self.model, model_path)
             logger.info(f"[REGRESSION] XGBoost model đã lưu → {model_path}")
         y_pred = self.model.predict(test[feature_cols])

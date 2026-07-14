@@ -17,6 +17,7 @@ from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     accuracy_score,
+    classification_report,
     confusion_matrix,
     f1_score,
     precision_score,
@@ -92,6 +93,46 @@ def _plot_confusion_matrix(
     fig.savefig(path, bbox_inches="tight", dpi=150)
     plt.close(fig)
     logger.info(f"[CLASSIFY] Confusion matrix → {path}")
+
+
+def _export_classification_metrics(
+    y_test: pd.Series,
+    y_pred: np.ndarray,
+    labels: list,
+    cm: np.ndarray,
+    metrics: dict,
+    algo: str,
+    target_col: str,
+    out_dir: str,
+) -> None:
+    """Persist hold-out metrics, per-class report, and confusion matrix."""
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    safe_target = str(target_col).replace(os.sep, "_")
+
+    cm_df = pd.DataFrame(
+        cm,
+        index=[f"actual_{label}" for label in labels],
+        columns=[f"pred_{label}" for label in labels],
+    )
+    cm_path = os.path.join(out_dir, f"cm_{algo}_{safe_target}.csv")
+    cm_df.to_csv(cm_path, encoding="utf-8")
+
+    metrics_path = os.path.join(out_dir, f"metrics_{algo}_{safe_target}.csv")
+    pd.DataFrame([metrics]).to_csv(metrics_path, index=False, encoding="utf-8")
+
+    report = classification_report(
+        y_test,
+        y_pred,
+        labels=labels,
+        output_dict=True,
+        zero_division=0,
+    )
+    report_path = os.path.join(out_dir, f"classification_report_{algo}_{safe_target}.csv")
+    pd.DataFrame(report).T.to_csv(report_path, encoding="utf-8")
+    logger.info(
+        f"[CLASSIFY] Metrics CSV → {metrics_path}; "
+        f"Confusion Matrix CSV → {cm_path}; Report CSV → {report_path}"
+    )
 
 
 def _plot_roc_curve(
@@ -272,8 +313,30 @@ class ClassificationPipeline:
             config.get("base_output_dir", "outputs"),
             dataset_name, "ml", "classification"
         )
+        labels = sorted(y.unique().tolist())
+        holdout_metrics = {
+            "algorithm": self.algorithm,
+            "target_col": target_col,
+            "split": f"train={1 - test_size:.0%}/test={test_size:.0%}",
+            "n_train": len(X_train),
+            "n_test": len(X_test),
+            "accuracy": round(acc, 4),
+            "precision_weighted": round(prec, 4),
+            "recall_weighted": round(rec, 4),
+            "f1_weighted": round(f1, 4),
+        }
+        _export_classification_metrics(
+            y_test,
+            y_pred,
+            labels,
+            cm,
+            holdout_metrics,
+            self.algorithm,
+            target_col,
+            viz_dir,
+        )
         _plot_confusion_matrix(
-            cm, [str(l) for l in sorted(y.unique().tolist())],
+            cm, [str(l) for l in labels],
             self.algorithm, target_col, viz_dir
         )
         _plot_roc_curve(self.model, X_test, y_test, self.algorithm, target_col, viz_dir)

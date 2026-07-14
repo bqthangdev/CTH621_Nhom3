@@ -149,6 +149,70 @@ def _plot_cluster_pca(
     except Exception as e:
         logger.warning(f"[CLUSTER] Bỏ qua PCA scatter ({algo_name}): {e}")
 
+def _export_cluster_profile(
+    X_features: pd.DataFrame,
+    labels: np.ndarray,
+    algo_name: str,
+    out_dir: str,
+    top_n_log: int = 8,
+) -> None:
+    """Export descriptive statistics per cluster for interpretation."""
+    labels = np.asarray(labels)
+    if len(X_features) != len(labels):
+        logger.warning(
+            f"[CLUSTER] Skip profile for {algo_name}: feature rows "
+            f"({len(X_features)}) != labels ({len(labels)})."
+        )
+        return
+
+    profile_df = X_features.copy()
+    profile_df.loc[:, "cluster"] = labels
+
+    sizes = (
+        profile_df["cluster"]
+        .value_counts(dropna=False)
+        .rename_axis("cluster")
+        .reset_index(name="n_samples")
+        .sort_values("cluster")
+    )
+    sizes_path = os.path.join(out_dir, f"cluster_sizes_{algo_name}.csv")
+    sizes.to_csv(sizes_path, index=False, encoding="utf-8")
+
+    feature_cols = [c for c in profile_df.columns if c != "cluster"]
+    rows = []
+    grouped = profile_df.groupby("cluster", dropna=False)
+    for cluster_id, group in grouped:
+        for feature in feature_cols:
+            values = group[feature]
+            row = {"cluster": cluster_id, "feature": feature, "n_samples": len(group)}
+            row["mean"] = values.mean()
+            row["std"] = values.std()
+            row["median"] = values.median()
+            row["min"] = values.min()
+            row["max"] = values.max()
+            rows.append(row)
+
+    profile_path = os.path.join(out_dir, f"cluster_profile_{algo_name}.csv")
+    pd.DataFrame(rows).to_csv(profile_path, index=False, encoding="utf-8")
+
+    global_means = X_features.mean(numeric_only=True)
+    cluster_means = grouped[feature_cols].mean(numeric_only=True)
+    if not cluster_means.empty:
+        diff = cluster_means.subtract(global_means, axis=1).abs()
+        for cluster_id in diff.index:
+            top_features = diff.loc[cluster_id].sort_values(ascending=False).head(top_n_log)
+            summary = ", ".join(f"{name}={value:.4g}" for name, value in top_features.items())
+            n_samples = int(sizes.loc[sizes["cluster"].eq(cluster_id), "n_samples"].iloc[0])
+            logger.info(
+                f"[CLUSTER] {algo_name} cluster={cluster_id} | n={n_samples} | "
+                f"top differentiating features: {summary}"
+            )
+
+    logger.info(
+        f"[CLUSTER] Cluster sizes -> {sizes_path}; "
+        f"Cluster profile -> {profile_path}"
+    )
+
 
 class ClusteringPipeline:
     """
@@ -229,17 +293,18 @@ class ClusteringPipeline:
         X_scaled = scaler.fit_transform(X)
 
         results = {}
-        results["kmeans"] = self._run_kmeans(X_scaled, X.index, cl_cfg, out_dir, model_dir, dataset_name, config)
-        results["hierarchical"] = self._run_hierarchical(X_scaled, X.index, cl_cfg, out_dir, dataset_name, config)
-        results["dbscan"] = self._run_dbscan(X_scaled, X.index, cl_cfg, out_dir, dataset_name, config)
-        results["gaussian_mixture"] = self._run_gaussian_mixture(X_scaled, X.index, cl_cfg, out_dir, dataset_name, config)
+        results["kmeans"] = self._run_kmeans(X_scaled, X, cl_cfg, out_dir, model_dir, dataset_name, config)
+        results["hierarchical"] = self._run_hierarchical(X_scaled, X, cl_cfg, out_dir, dataset_name, config)
+        results["dbscan"] = self._run_dbscan(X_scaled, X, cl_cfg, out_dir, dataset_name, config)
+        results["gaussian_mixture"] = self._run_gaussian_mixture(X_scaled, X, cl_cfg, out_dir, dataset_name, config)
 
         logger.info(f"[CLUSTER] Hoàn thành clustering cho {dataset_name}")
         return results
 
     # ── K-Means ──────────────────────────────────────────────────────────────
 
-    def _run_kmeans(self, X_scaled, index, cl_cfg, out_dir, model_dir, dataset_name, config):
+    def _run_kmeans(self, X_scaled, X_features, cl_cfg, out_dir, model_dir, dataset_name, config):
+        index = X_features.index
         max_k = cl_cfg.get("max_k", 10)
         kmeans_init = cl_cfg.get("kmeans_init", "k-means++")
         kmeans_n_init = cl_cfg.get("kmeans_n_init", 10)
@@ -303,6 +368,7 @@ class ClusteringPipeline:
 
         labels_df = pd.DataFrame({"kmeans_cluster": final_labels}, index=index)
         labels_df.to_csv(os.path.join(out_dir, "kmeans_labels.csv"))
+        _export_cluster_profile(X_features, final_labels, "kmeans", out_dir)
         _plot_cluster_pca(
             X_scaled, final_labels, "kmeans", dataset_name, out_dir,
             max_samples=cl_cfg.get("plot_max_samples"),
@@ -369,7 +435,8 @@ class ClusteringPipeline:
 
     # ── Hierarchical ─────────────────────────────────────────────────────────
 
-    def _run_hierarchical(self, X_scaled, index, cl_cfg, out_dir, dataset_name, config):
+    def _run_hierarchical(self, X_scaled, X_features, cl_cfg, out_dir, dataset_name, config):
+        index = X_features.index
         method = cl_cfg.get("linkage_method", "ward")
         n_clusters = cl_cfg.get("n_clusters", 3)
         max_samples = cl_cfg.get("hierarchical_max_samples")
@@ -379,11 +446,13 @@ class ClusteringPipeline:
 
         X_h = X_scaled
         index_h = index
+        X_h_features = X_features
         if max_samples and len(X_scaled) > max_samples:
             rng = np.random.RandomState(self.random_state)
             sample_idx = np.sort(rng.choice(len(X_scaled), size=max_samples, replace=False))
             X_h = X_scaled[sample_idx]
             index_h = index[sample_idx]
+            X_h_features = X_features.iloc[sample_idx]
             logger.info(
                 f"[CLUSTER] Hierarchical uses {max_samples}/{len(X_scaled)} sampled rows "
                 f"to avoid O(n^2) linkage cost."
@@ -412,6 +481,7 @@ class ClusteringPipeline:
 
         labels_df = pd.DataFrame({"hierarchical_cluster": labels}, index=index_h)
         labels_df.to_csv(os.path.join(out_dir, "hierarchical_labels.csv"))
+        _export_cluster_profile(X_h_features, labels, "hierarchical", out_dir)
         _plot_cluster_pca(
             X_h, labels, "hierarchical", dataset_name, out_dir,
             max_samples=cl_cfg.get("plot_max_samples"),
@@ -434,15 +504,17 @@ class ClusteringPipeline:
 
     # ── DBSCAN ───────────────────────────────────────────────────────────────
 
-    def _run_dbscan(self, X_scaled, index, cl_cfg, out_dir, dataset_name, config):
+    def _run_dbscan(self, X_scaled, X_features, cl_cfg, out_dir, dataset_name, config):
+        index = X_features.index
         eps = cl_cfg.get("dbscan_eps", 0.5)
         min_samples = cl_cfg.get("dbscan_min_samples", 5)
         metric = cl_cfg.get("dbscan_metric", "euclidean")
         max_samples = cl_cfg.get("dbscan_max_samples")
 
-        X_db, index_db, _, sampled = _sample_rows(
+        X_db, index_db, sample_idx, sampled = _sample_rows(
             X_scaled, index, max_samples, self.random_state, "DBSCAN"
         )
+        X_db_features = X_features.iloc[sample_idx] if sampled else X_features
 
         db = DBSCAN(eps=eps, min_samples=min_samples, metric=metric)
         labels = db.fit_predict(X_db)
@@ -464,6 +536,7 @@ class ClusteringPipeline:
         if sampled:
             labels_df["sampled_for_dbscan"] = True
         labels_df.to_csv(os.path.join(out_dir, "dbscan_labels.csv"))
+        _export_cluster_profile(X_db_features, labels, "dbscan", out_dir)
         _plot_cluster_pca(
             X_db, labels, "dbscan", dataset_name, out_dir,
             max_samples=cl_cfg.get("plot_max_samples"),
@@ -489,7 +562,8 @@ class ClusteringPipeline:
 
     # ── Gaussian Mixture Model ───────────────────────────────────────────────
 
-    def _run_gaussian_mixture(self, X_scaled, index, cl_cfg, out_dir, dataset_name, config):
+    def _run_gaussian_mixture(self, X_scaled, X_features, cl_cfg, out_dir, dataset_name, config):
+        index = X_features.index
         n_components = cl_cfg.get("gmm_n_components", 3)
         covariance_type = cl_cfg.get("gmm_covariance_type", "full")
         fit_max_samples = cl_cfg.get("gmm_fit_max_samples")
@@ -524,6 +598,7 @@ class ClusteringPipeline:
 
         labels_df = pd.DataFrame({"gmm_cluster": labels}, index=index)
         labels_df.to_csv(os.path.join(out_dir, "gmm_labels.csv"))
+        _export_cluster_profile(X_features, labels, "gmm", out_dir)
         _plot_cluster_pca(
             X_scaled, labels, "gmm", dataset_name, out_dir,
             max_samples=cl_cfg.get("plot_max_samples"),

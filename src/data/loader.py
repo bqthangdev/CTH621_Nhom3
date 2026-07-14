@@ -190,16 +190,68 @@ def load_audio(dir_path: str, extensions: tuple = (".wav", ".mp3", ".flac", ".og
     ]
     logger.info(f"[LOAD] Audio — tìm thấy {len(audio_files)} file trong {dir_path}")
 
+    def _audio_features(waveform: np.ndarray, sr: int) -> dict:
+        if waveform.size == 0 or sr <= 0:
+            return {
+                "rms_mean": 0.0,
+                "rms_std": 0.0,
+                "zero_crossing_rate": 0.0,
+                "amplitude_mean": 0.0,
+                "amplitude_std": 0.0,
+                "amplitude_max": 0.0,
+                "spectral_centroid_hz": 0.0,
+                "spectral_bandwidth_hz": 0.0,
+                "spectral_rolloff_85_hz": 0.0,
+            }
+
+        y = np.asarray(waveform, dtype="float32")
+        abs_y = np.abs(y)
+        rms = np.sqrt(np.mean(np.square(y)))
+        zcr = np.mean(np.abs(np.diff(np.signbit(y).astype("int8"))))
+
+        spectrum = np.abs(np.fft.rfft(y))
+        freqs = np.fft.rfftfreq(len(y), d=1.0 / sr)
+        total_energy = spectrum.sum()
+        if total_energy > 0:
+            centroid = float((freqs * spectrum).sum() / total_energy)
+            bandwidth = float(np.sqrt((((freqs - centroid) ** 2) * spectrum).sum() / total_energy))
+            cumulative = np.cumsum(spectrum)
+            rolloff_idx = int(np.searchsorted(cumulative, 0.85 * total_energy))
+            rolloff = float(freqs[min(rolloff_idx, len(freqs) - 1)])
+        else:
+            centroid = bandwidth = rolloff = 0.0
+
+        return {
+            "rms_mean": float(rms),
+            "rms_std": float(np.std(np.square(y))),
+            "zero_crossing_rate": float(zcr),
+            "amplitude_mean": float(abs_y.mean()),
+            "amplitude_std": float(abs_y.std()),
+            "amplitude_max": float(abs_y.max()),
+            "spectral_centroid_hz": centroid,
+            "spectral_bandwidth_hz": bandwidth,
+            "spectral_rolloff_85_hz": rolloff,
+        }
+
     for audio_path in audio_files:
         try:
             waveform, sr = librosa.load(str(audio_path), sr=None)
-            records.append({
+            record = {
                 "path": str(audio_path),
                 "label": audio_path.parent.name,
                 "waveform": waveform,
                 "sample_rate": sr,
                 "duration": len(waveform) / sr,
-            })
+                "file_size_bytes": audio_path.stat().st_size,
+            }
+            record.update(_audio_features(waveform, sr))
+            try:
+                mfcc = librosa.feature.mfcc(y=waveform, sr=sr, n_mfcc=5)
+                for idx, value in enumerate(mfcc.mean(axis=1), start=1):
+                    record[f"mfcc_{idx}_mean"] = float(value)
+            except Exception:
+                pass
+            records.append(record)
         except Exception as e:
             logger.warning(f"[LOAD] Bỏ qua audio lỗi {audio_path}: {e}")
 

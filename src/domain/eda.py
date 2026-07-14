@@ -90,6 +90,26 @@ def compute_statistics(df: pd.DataFrame, var_types: dict) -> dict:
 
     for col in quant_cols:
         s = df[col].dropna()
+        if s.empty:
+            stats[col] = {
+                "type": "quantitative",
+                "count": 0,
+                "null_count": df[col].isna().sum(),
+                "mean": np.nan,
+                "median": np.nan,
+                "mode": None,
+                "p5": np.nan,
+                "p25": np.nan,
+                "p50": np.nan,
+                "p75": np.nan,
+                "p95": np.nan,
+                "range": np.nan,
+                "variance": np.nan,
+                "std": np.nan,
+                "cv": np.nan,
+                "iqr": np.nan,
+            }
+            continue
         p = np.percentile(s, [5, 25, 50, 75, 95])
         mean_val = s.mean()
         iqr = p[3] - p[1]
@@ -159,12 +179,20 @@ def plot_boxplots(df: pd.DataFrame, quant_cols: list, out_dir: str) -> None:
         _savefig(fig, os.path.join(out_dir, f"boxplot_{col}.png"))
 
 
-def plot_scatter_matrix(df: pd.DataFrame, quant_cols: list, out_dir: str) -> None:
+def plot_scatter_matrix(
+    df: pd.DataFrame,
+    quant_cols: list,
+    out_dir: str,
+    max_samples: int = 5000,
+) -> None:
     """Scatter plot matrix (pairplot) cho các cặp biến định lượng."""
     if len(quant_cols) < 2:
         return
     cols = quant_cols[:6]  # giới hạn 6 cột để tránh biểu đồ quá lớn
-    fig = sns.pairplot(df[cols].dropna()).figure
+    plot_df = df[cols].dropna()
+    if len(plot_df) > max_samples:
+        plot_df = plot_df.sample(max_samples, random_state=42)
+    fig = sns.pairplot(plot_df).figure
     _savefig(fig, os.path.join(out_dir, "scatter_matrix.png"))
 
 
@@ -246,8 +274,9 @@ def plot_class_distribution(df: pd.DataFrame, target_cols: list, out_dir: str) -
     for col in target_cols:
         if col not in df.columns:
             continue
-        freq = df[col].value_counts().sort_index()
-        pct  = df[col].value_counts(normalize=True).sort_index() * 100
+        values = df[col].astype("string").fillna("<missing>")
+        freq = values.value_counts()
+        pct = values.value_counts(normalize=True) * 100
         n_classes = len(freq)
         palette = sns.color_palette("tab10", n_classes)
 
@@ -286,6 +315,224 @@ def plot_class_distribution(df: pd.DataFrame, target_cols: list, out_dir: str) -
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. Pipeline tiền xử lý
 # ─────────────────────────────────────────────────────────────────────────────
+
+def plot_group_c_multimedia_overview(
+    df: pd.DataFrame,
+    subtype: Optional[str],
+    out_dir: str,
+    max_samples: int = 3000,
+) -> None:
+    """Group C visuals: overall label balance and per-class numeric feature profiles."""
+    label_col = "label" if "label" in df.columns else None
+    categorical_cols = [
+        c for c in ["label", "dataset", "sublabel"]
+        if c in df.columns
+    ]
+    if categorical_cols:
+        plot_class_distribution(df, categorical_cols, out_dir)
+
+    numeric_cols = [
+        c for c in df.select_dtypes(include="number").columns.tolist()
+        if df[c].nunique(dropna=True) > 1
+    ]
+    if not numeric_cols:
+        return
+
+    if label_col:
+        counts = df[label_col].value_counts(dropna=False).rename_axis(label_col).reset_index(name="count")
+        counts["relative_pct"] = (counts["count"] / counts["count"].sum() * 100).round(4)
+        counts.to_csv(os.path.join(out_dir, "group_c_class_counts.csv"), index=False)
+
+        profile_cols = numeric_cols[:18]
+        profile = df.groupby(label_col, dropna=False)[profile_cols].mean()
+        profile.to_csv(os.path.join(out_dir, "group_c_feature_profile_by_class.csv"))
+        scaled_profile = (profile - profile.mean()) / profile.std(ddof=0).replace(0, np.nan)
+        scaled_profile = scaled_profile.fillna(0.0)
+        fig, ax = plt.subplots(figsize=(max(9, len(profile_cols) * 0.6), max(5, len(profile) * 0.45)))
+        sns.heatmap(scaled_profile, ax=ax, cmap="coolwarm", center=0, linewidths=0.3)
+        ax.set_title("Group C Feature Profile by Class")
+        ax.set_xlabel("Numeric feature")
+        ax.set_ylabel("Class")
+        plt.xticks(rotation=45, ha="right")
+        _savefig(fig, os.path.join(out_dir, "group_c_feature_profile_heatmap.png"))
+
+        priority = []
+        if subtype == "image":
+            priority = [
+                "brightness_mean", "brightness_std", "edge_density",
+                "red_mean", "green_mean", "blue_mean",
+            ]
+        elif subtype == "audio":
+            priority = [
+                "duration", "rms_mean", "zero_crossing_rate",
+                "spectral_centroid_hz", "spectral_bandwidth_hz",
+                "spectral_rolloff_85_hz",
+            ]
+        box_cols = [c for c in priority if c in numeric_cols]
+        box_cols += [c for c in numeric_cols if c not in box_cols][: max(0, 6 - len(box_cols))]
+        for col in box_cols[:6]:
+            plot_df = df[[label_col, col]].dropna()
+            if len(plot_df) > max_samples:
+                plot_df = plot_df.sample(max_samples, random_state=42)
+            fig, ax = plt.subplots(figsize=(max(8, plot_df[label_col].nunique() * 0.85), 4.5))
+            sns.boxplot(data=plot_df, x=label_col, y=col, ax=ax, color="#4C72B0")
+            ax.set_title(f"Group C Class-Level Distribution - {col}")
+            ax.set_xlabel("Class")
+            ax.set_ylabel(col)
+            plt.xticks(rotation=45, ha="right")
+            _savefig(fig, os.path.join(out_dir, f"group_c_class_box_{col}.png"))
+
+    if len(numeric_cols) >= 2:
+        try:
+            from sklearn.decomposition import PCA
+            from sklearn.preprocessing import StandardScaler
+
+            pca_cols = numeric_cols[:30]
+            pca_df = df[pca_cols].copy()
+            pca_df = pca_df.fillna(pca_df.median(numeric_only=True))
+            valid = pca_df.notna().all(axis=1)
+            pca_df = pca_df[valid]
+            labels = df.loc[pca_df.index, label_col].astype(str) if label_col else None
+            if len(pca_df) > max_samples:
+                sample_idx = pca_df.sample(max_samples, random_state=42).index
+                pca_df = pca_df.loc[sample_idx]
+                labels = labels.loc[sample_idx] if labels is not None else None
+            X = StandardScaler().fit_transform(pca_df)
+            coords = PCA(n_components=2, random_state=42).fit_transform(X)
+            fig, ax = plt.subplots(figsize=(8, 6))
+            if labels is not None:
+                for label in sorted(labels.unique()):
+                    mask = labels == label
+                    ax.scatter(coords[mask, 0], coords[mask, 1], s=18, alpha=0.6, label=label)
+                ax.legend(fontsize=8, loc="best", ncol=max(1, len(labels.unique()) // 8))
+            else:
+                ax.scatter(coords[:, 0], coords[:, 1], s=18, alpha=0.6, color="#4C72B0")
+            ax.set_title("Group C Numeric Feature PCA")
+            ax.set_xlabel("PC1")
+            ax.set_ylabel("PC2")
+            _savefig(fig, os.path.join(out_dir, "group_c_pca_by_class.png"))
+        except Exception as exc:
+            logger.warning(f"[EDA] Skip Group C PCA plot: {exc}")
+
+    if subtype == "image" and label_col and "path" in df.columns:
+        try:
+            from PIL import Image
+
+            classes = df[label_col].dropna().astype(str).value_counts().index.tolist()[:9]
+            samples = []
+            for cls in classes:
+                cls_rows = df[df[label_col].astype(str) == cls].head(3)
+                for _, row in cls_rows.iterrows():
+                    samples.append((cls, row["path"]))
+            if samples:
+                ncols = 3
+                nrows = int(np.ceil(len(samples) / ncols))
+                fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 3, nrows * 3))
+                axes = np.array(axes).reshape(-1)
+                for ax, (cls, path_value) in zip(axes, samples):
+                    img = Image.open(path_value).convert("RGB")
+                    ax.imshow(img)
+                    ax.set_title(str(cls), fontsize=9)
+                    ax.axis("off")
+                for ax in axes[len(samples):]:
+                    ax.axis("off")
+                plt.tight_layout()
+                _savefig(fig, os.path.join(out_dir, "group_c_image_samples_by_class.png"))
+        except Exception as exc:
+            logger.warning(f"[EDA] Skip Group C image samples: {exc}")
+
+
+def export_frequency_tables(df: pd.DataFrame, qual_cols: list, out_dir: str) -> None:
+    """Export long-form absolute and relative frequency tables for categorical columns."""
+    rows = []
+    for col in qual_cols:
+        freq = df[col].value_counts(dropna=False)
+        pct = df[col].value_counts(normalize=True, dropna=False) * 100
+        for value, count in freq.items():
+            rows.append({
+                "column": col,
+                "value": value,
+                "count": int(count),
+                "relative_freq_pct": round(float(pct.loc[value]), 4),
+            })
+
+        col_table = pd.DataFrame(rows[-len(freq):])
+        col_table.to_csv(os.path.join(out_dir, f"frequency_{col}.csv"), index=False)
+
+    if rows:
+        pd.DataFrame(rows).to_csv(os.path.join(out_dir, "frequency_tables.csv"), index=False)
+
+
+def _iqr_bounds(df: pd.DataFrame, quant_cols: list, multiplier: float, exclude: Optional[list] = None) -> dict:
+    bounds = {}
+    skip = set(exclude or [])
+    for col in quant_cols:
+        if col in skip or col not in df.columns:
+            continue
+        s = df[col].dropna()
+        if s.empty:
+            continue
+        q1, q3 = s.quantile(0.25), s.quantile(0.75)
+        iqr = q3 - q1
+        bounds[col] = (q1 - multiplier * iqr, q3 + multiplier * iqr)
+    return bounds
+
+
+def _count_outliers(df: pd.DataFrame, bounds: dict) -> dict:
+    counts = {}
+    for col, (lower, upper) in bounds.items():
+        if col in df.columns:
+            counts[col] = int(((df[col] < lower) | (df[col] > upper)).sum())
+    return counts
+
+
+def export_before_after_summary(
+    df_before: pd.DataFrame,
+    df_after: pd.DataFrame,
+    var_types_before: dict,
+    var_types_after: dict,
+    out_dir: str,
+    protected_cols: Optional[list] = None,
+    iqr_multiplier: float = 1.5,
+) -> None:
+    """Export a compact before/after audit for missing values, outliers, and schema changes."""
+    quant_before = var_types_before["quantitative_continuous"] + var_types_before["quantitative_discrete"]
+    quant_after = var_types_after["quantitative_continuous"] + var_types_after["quantitative_discrete"]
+    bounds = _iqr_bounds(df_before, quant_before, iqr_multiplier, exclude=protected_cols)
+    out_before = _count_outliers(df_before, bounds)
+    out_after = _count_outliers(df_after, bounds)
+
+    all_cols = sorted(set(df_before.columns) | set(df_after.columns))
+    rows = []
+    for col in all_cols:
+        rows.append({
+            "column": col,
+            "in_before": col in df_before.columns,
+            "in_after": col in df_after.columns,
+            "dtype_before": str(df_before[col].dtype) if col in df_before.columns else "",
+            "dtype_after": str(df_after[col].dtype) if col in df_after.columns else "",
+            "null_before": int(df_before[col].isna().sum()) if col in df_before.columns else "",
+            "null_after": int(df_after[col].isna().sum()) if col in df_after.columns else "",
+            "outliers_before_iqr": out_before.get(col, ""),
+            "outliers_after_iqr_raw_bounds": out_after.get(col, ""),
+            "min_before": df_before[col].min() if col in quant_before and col in df_before.columns else "",
+            "max_before": df_before[col].max() if col in quant_before and col in df_before.columns else "",
+            "min_after": df_after[col].min() if col in quant_after and col in df_after.columns else "",
+            "max_after": df_after[col].max() if col in quant_after and col in df_after.columns else "",
+        })
+
+    pd.DataFrame(rows).to_csv(os.path.join(out_dir, "before_after_summary.csv"), index=False)
+    pd.DataFrame([{
+        "rows_before": len(df_before),
+        "cols_before": len(df_before.columns),
+        "rows_after": len(df_after),
+        "cols_after": len(df_after.columns),
+        "total_null_before": int(df_before.isna().sum().sum()),
+        "total_null_after": int(df_after.isna().sum().sum()),
+        "total_outliers_before_iqr": int(sum(out_before.values())),
+        "total_outliers_after_iqr_raw_bounds": int(sum(out_after.values())),
+    }]).to_csv(os.path.join(out_dir, "before_after_overview.csv"), index=False)
+
 
 def _fill_nulls_group_a(df: pd.DataFrame, var_types: dict) -> pd.DataFrame:
     df = df.copy()
@@ -342,8 +589,19 @@ def _normalize(
 
 def _fill_nulls_group_b(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    df = df.ffill().bfill()           # Forward Fill, rồi Backward Fill
-    df = df.interpolate(method="linear")  # Lấp đầy khoảng trống còn lại
+    numeric_cols = df.select_dtypes(include="number").columns.tolist()
+    non_numeric_cols = [c for c in df.columns if c not in numeric_cols]
+
+    if numeric_cols:
+        method = "time" if isinstance(df.index, pd.DatetimeIndex) else "linear"
+        try:
+            df[numeric_cols] = df[numeric_cols].interpolate(method=method)
+        except ValueError:
+            df[numeric_cols] = df[numeric_cols].interpolate(method="linear")
+        df[numeric_cols] = df[numeric_cols].ffill().bfill()
+
+    if non_numeric_cols:
+        df[non_numeric_cols] = df[non_numeric_cols].ffill().bfill()
     return df
 
 
@@ -403,6 +661,7 @@ def run_eda_pipeline(
 
     eda_cfg = config.get("eda", {})
     ds_cfg = (config.get("datasets") or {}).get(dataset_name, {})
+    iqr_mult = eda_cfg.get("iqr_multiplier", 1.5)
 
     # ── Drop columns không cần thiết (ví dụ: id) ────────────────────────────
     drop_cols = ds_cfg.get("drop_columns", [])
@@ -423,7 +682,15 @@ def run_eda_pipeline(
 
     _export_dataframe(df, raw_dir, "data_raw", group, eda_cfg)
 
+    plot_histograms(df, quant_cols, raw_dir)
     plot_boxplots(df, quant_cols, raw_dir)
+    if group in {"A", "B"}:
+        plot_scatter_matrix(
+            df,
+            quant_cols,
+            raw_dir,
+            max_samples=eda_cfg.get("plot_max_samples", 5000),
+        )
     plot_correlation_heatmap(df, quant_cols, raw_dir)
     plot_null_heatmap(df, raw_dir)
     _protect = ds_cfg.get("protect_columns", [])
@@ -436,9 +703,19 @@ def run_eda_pipeline(
     stats = compute_statistics(df, var_types)
     stats_df = pd.DataFrame(stats).T
     stats_df.to_csv(os.path.join(raw_dir, "statistics.csv"))
+    export_frequency_tables(df, var_types["qualitative"], raw_dir)
+    if group == "C":
+        plot_group_c_multimedia_overview(
+            df,
+            ds_cfg.get("subtype"),
+            raw_dir,
+            max_samples=eda_cfg.get("plot_max_samples", 3000),
+        )
 
     # ── Pipeline 2: Transformed ──────────────────────────────────────────────
     logger.info(f"[EDA] Pipeline 2 (transformed) — {dataset_name}")
+
+    outlier_method = eda_cfg.get("outlier_method", "iqr-cap")
 
     if group == "A":
         df_t = _fill_nulls_group_a(df, var_types)
@@ -466,6 +743,18 @@ def run_eda_pipeline(
                 )
     else:  # Group B & C
         df_t = _fill_nulls_group_b(df)
+        if group == "B" and outlier_method == "iqr-cap":
+            protected_b = [
+                c for c in [ds_cfg.get("target_col")]
+                if c
+            ] + ds_cfg.get("clustering", {}).get("label_columns", [])
+            numeric_cols_b = df_t.select_dtypes(include="number").columns.tolist()
+            df_t = _cap_outliers_iqr(
+                df_t,
+                numeric_cols_b,
+                multiplier=iqr_mult,
+                exclude=protected_b,
+            )
         transforms = eda_cfg.get("group_b_transforms", [])
         if "differencing" in transforms:
             df_t = df_t.diff().dropna()
@@ -483,12 +772,44 @@ def run_eda_pipeline(
     # Biểu đồ sau biến đổi
     var_types_t = classify_variables(df_t)
     quant_cols_t = var_types_t["quantitative_continuous"] + var_types_t["quantitative_discrete"]
+    stats_t = compute_statistics(df_t, var_types_t)
+    pd.DataFrame(stats_t).T.to_csv(os.path.join(trans_dir, "statistics.csv"))
+    export_frequency_tables(df_t, var_types_t["qualitative"], trans_dir)
+    if group == "C":
+        plot_group_c_multimedia_overview(
+            df_t,
+            ds_cfg.get("subtype"),
+            trans_dir,
+            max_samples=eda_cfg.get("plot_max_samples", 3000),
+        )
+
+    protected_for_summary = ds_cfg.get("protect_columns", [])
+    if group == "B":
+        protected_for_summary = [
+            c for c in [ds_cfg.get("target_col")]
+            if c
+        ] + ds_cfg.get("clustering", {}).get("label_columns", [])
+    export_before_after_summary(
+        df,
+        df_t,
+        var_types,
+        var_types_t,
+        trans_dir,
+        protected_cols=protected_for_summary,
+        iqr_multiplier=iqr_mult,
+    )
     plot_histograms(df_t, quant_cols_t, trans_dir)
     plot_boxplots(df_t, quant_cols_t, trans_dir)
     if group == "A":
         plot_scatter_matrix(df_t, quant_cols_t, trans_dir)
         plot_bar_charts(df_t, var_types_t["qualitative"], trans_dir)
     elif group == "B":
+        plot_scatter_matrix(
+            df_t,
+            quant_cols_t,
+            trans_dir,
+            max_samples=eda_cfg.get("plot_max_samples", 5000),
+        )
         plot_timeseries(df_t, trans_dir)
     plot_correlation_heatmap(df_t, quant_cols_t, trans_dir)
 
