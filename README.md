@@ -726,7 +726,7 @@ Tập hợp các bộ dữ liệu thực hành, phân loại theo dạng dữ li
 
 | Tên dataset | Nguồn | Bài báo gốc (DOI) |
 |---|---|---|
-| Stroke Prediction Dataset | [Kaggle](https://www.kaggle.com/datasets/kukuroo3/stoke-prediction-dataset) | — |
+| Healthcare Dataset Stroke Data | [Kaggle](https://www.kaggle.com/datasets/aouatifcherdid/healthcare-dataset-stroke-data) | — |
 | Neurofibromatosis Type 1 | [UC Irvine](https://archive.ics.uci.edu/dataset/1162/neurofibromatosis+type+1+clinical+symptoms+of+familial+and+sporadic+cases) | [10.5505/turkhijyen.2025.06337](https://doi.org/10.5505/turkhijyen.2025.06337) |
 | Predict Students' Dropout and Academic Success | [Kaggle](https://www.kaggle.com/datasets/thedevastator/higher-education-predictors-of-student-retention) | — |
 

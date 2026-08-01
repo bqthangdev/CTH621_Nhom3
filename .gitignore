@@ -64,6 +64,7 @@ outputs/**/*.joblib
 outputs/**/*.pkl
 outputs/**/*.csv
 outputs/**/*.xlsx
+*-bk-*
 
 # ── Logs ──────────────────────────────────────────────────────
 logs/*.log
@@ -83,3 +84,8 @@ AGENTS.md
 data/progress-bk-v1.json
 summary_results-bk-v1.csv
 pipeline_run-bk-v1.log
+
+*tmp*
+*-bk-*
+
+/docs/latex/*

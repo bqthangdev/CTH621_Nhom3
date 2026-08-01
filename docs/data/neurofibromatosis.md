@@ -231,29 +231,6 @@ Với bài toán phân loại nhị phân trên tập dữ liệu lâm sàng nà
 
 ---
 
-## Ghi chú cần bổ sung
+## Lưu ý về quy mô dữ liệu
 
-### [GHI CHÚ 1] Kết quả đầy đủ của bài báo (Bảng 2.13 còn thiếu)
-
-Tóm tắt công khai của Sharafi et al. (2025) chỉ công bố kết quả của mô hình tốt nhất (XGBoost — 62,86%). Kết quả chi tiết của bốn thuật toán còn lại (KNN, ANN, SVM, Decision Tree) cũng như các chỉ số F1-Score, Precision, Recall và ROC-AUC của toàn bộ mô hình **chưa được thu thập** do toàn văn bài báo yêu cầu xác thực truy cập.
-
-**Cần bổ sung:** Đề nghị nhóm cung cấp kết quả từ toàn văn bài báo (Table kết quả trong phần Results) để hoàn thiện Bảng 2.13. Các thông tin cần điền:
-- Accuracy, F1-Score, Precision, Recall (và nếu có: ROC-AUC) của tất cả 5 thuật toán: KNN, ANN, SVM, Decision Tree, XGBoost.
-- Thông tin về phương pháp chia tập (train/test ratio, cross-validation nếu có).
-- Thông tin về feature selection: danh sách các đặc trưng được ANOVA chọn lọc.
-
-### [GHI CHÚ 2] Bất nhất số lượng mẫu giữa các nguồn
-
-Có sự chênh lệch về số lượng mẫu giữa ba nguồn thông tin:
-
-| Nguồn | Số mẫu | Phân bố |
-|:------|-------:|:--------|
-| UCI ML Repository (metadata) | 331 | 167 sporadic + 142 familial (theo mô tả trên trang UCI) |
-| Bài báo Sharafi et al. (2025) | 241 | 121 sporadic + 120 familial |
-| CSV trong workspace dự án | 295 | 160 sporadic (Case Type=0) + 135 familial (Case Type=1) |
-
-**Cần xác nhận:** Nhóm có biết lý do chênh lệch không? Ví dụ:
-- CSV hiện tại có phải là phiên bản đã được lọc/tiền xử lý không?
-- Hay đây là bản cập nhật mới hơn so với dữ liệu dùng trong bài báo?
-
-Trong khi chờ xác nhận, nhóm sử dụng CSV hiện có (295 mẫu) cho mọi thực nghiệm và ghi chú sự khác biệt này trong phần phân tích kết quả.
+Quy mô được công bố giữa các nguồn không đồng nhất: metadata UCI mô tả 331 trường hợp, bài báo Sharafi và cộng sự phân tích 241 bệnh nhân, còn tệp CSV trong workspace có 295 quan sát, gồm 160 mẫu `Case Type=0` và 135 mẫu `Case Type=1`. Không có bằng chứng trong tài liệu hiện có để xác định nguyên nhân chênh lệch; vì vậy mọi thống kê và kết quả của dự án sử dụng nhất quán tệp cục bộ 295 quan sát.

@@ -17,16 +17,24 @@ from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     accuracy_score,
+    average_precision_score,
+    balanced_accuracy_score,
     classification_report,
     confusion_matrix,
     f1_score,
+    precision_recall_curve,
     precision_score,
     recall_score,
 )
 from sklearn.base import clone
+from sklearn.calibration import calibration_curve
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
 from sklearn.model_selection import StratifiedKFold, cross_validate, train_test_split
 from sklearn.naive_bayes import GaussianNB
 from sklearn.neighbors import KNeighborsClassifier
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler, label_binarize
 from sklearn.svm import SVC
 from sklearn.tree import DecisionTreeClassifier
 
@@ -37,6 +45,7 @@ import seaborn as sns
 from sklearn.metrics import roc_curve, auc
 
 from src.infrastructure.logger import get_logger
+from src.infrastructure.output_paths import dataset_output_root
 
 logger = get_logger(__name__)
 
@@ -64,10 +73,12 @@ ALGO_MAP = {
 
 
 def _append_summary(row: dict) -> None:
+    """Append a run to the historical summary without replacing older results."""
     row.setdefault("timestamp", datetime.now().isoformat())
-    write_header = not Path(SUMMARY_FILE).exists()
-    with open(SUMMARY_FILE, "a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=SUMMARY_FIELDS, extrasaction="ignore")
+    summary_path = Path(SUMMARY_FILE)
+    write_header = not summary_path.exists() or summary_path.stat().st_size == 0
+    with summary_path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=SUMMARY_FIELDS, extrasaction="ignore")
         if write_header:
             writer.writeheader()
         writer.writerow(row)
@@ -79,18 +90,24 @@ def _plot_confusion_matrix(
     """Confusion matrix dạng heatmap — trực quan hóa số lượng TP/FP/TN/FN."""
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(max(5, len(labels) * 1.3), max(4, len(labels) * 1.1)))
+    row_totals = cm.sum(axis=1, keepdims=True)
+    row_pct = np.divide(cm, row_totals, out=np.zeros_like(cm, dtype=float), where=row_totals != 0) * 100
+    annotations = np.empty_like(cm, dtype=object)
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            annotations[i, j] = f"{cm[i, j]:,}\n({row_pct[i, j]:.1f}%)"
     sns.heatmap(
-        cm, annot=True, fmt="d", cmap="Blues", ax=ax,
+        cm, annot=annotations, fmt="", cmap="Blues", ax=ax,
         xticklabels=labels, yticklabels=labels,
         linewidths=0.5, linecolor="gray",
         cbar_kws={"shrink": 0.8},
     )
-    ax.set_title(f"Confusion Matrix — {algo} / {target_col}")
+    ax.set_title(f"Confusion Matrix — {algo} / {target_col}\ncount and row percentage")
     ax.set_xlabel("Predicted")
     ax.set_ylabel("Actual")
     plt.tight_layout()
     path = os.path.join(out_dir, f"cm_{algo}_{target_col}.png")
-    fig.savefig(path, bbox_inches="tight", dpi=150)
+    fig.savefig(path, bbox_inches="tight", dpi=300)
     plt.close(fig)
     logger.info(f"[CLASSIFY] Confusion matrix → {path}")
 
@@ -164,11 +181,114 @@ def _plot_roc_curve(
         plt.tight_layout()
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         path = os.path.join(out_dir, f"roc_{algo}_{target_col}.png")
-        fig.savefig(path, bbox_inches="tight", dpi=150)
+        fig.savefig(path, bbox_inches="tight", dpi=300)
         plt.close(fig)
         logger.info(f"[CLASSIFY] ROC curve (AUC={roc_auc:.3f}) → {path}")
     except Exception as e:
         logger.warning(f"[CLASSIFY] Bỏ qua ROC curve ({algo}/{target_col}): {e}")
+
+
+def _plot_precision_recall_curve(
+    model, X_test: pd.DataFrame, y_test: pd.Series,
+    algo: str, target_col: str, out_dir: str,
+) -> None:
+    """Binary or one-vs-rest precision-recall curves with average precision."""
+    try:
+        if hasattr(model, "predict_proba"):
+            scores = model.predict_proba(X_test)
+        elif hasattr(model, "decision_function"):
+            scores = model.decision_function(X_test)
+        else:
+            return
+        classes = np.asarray(model.classes_)
+        fig, ax = plt.subplots(figsize=(7, 5.5))
+        if len(classes) == 2:
+            positive = classes[1]
+            score = scores[:, 1] if np.ndim(scores) == 2 else scores
+            y_binary = (np.asarray(y_test) == positive).astype(int)
+            precision, recall, _ = precision_recall_curve(y_binary, score)
+            ap = average_precision_score(y_binary, score)
+            prevalence = y_binary.mean()
+            ax.plot(recall, precision, linewidth=2, label=f"AP={ap:.3f}; positive={positive}")
+            ax.axhline(prevalence, color="gray", linestyle="--", linewidth=1,
+                       label=f"Prevalence={prevalence:.3f}")
+        else:
+            y_binary = label_binarize(y_test, classes=classes)
+            for idx, cls in enumerate(classes):
+                score = scores[:, idx]
+                precision, recall, _ = precision_recall_curve(y_binary[:, idx], score)
+                ap = average_precision_score(y_binary[:, idx], score)
+                ax.plot(recall, precision, linewidth=1.8, label=f"{cls}: AP={ap:.3f}")
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1.02)
+        ax.set_xlabel("Recall")
+        ax.set_ylabel("Precision")
+        ax.set_title(f"Precision–Recall Curve — {algo} / {target_col}")
+        ax.legend(fontsize=8, loc="best")
+        ax.grid(alpha=0.25)
+        plt.tight_layout()
+        path = os.path.join(out_dir, f"pr_{algo}_{target_col}.png")
+        fig.savefig(path, bbox_inches="tight", dpi=300)
+        plt.close(fig)
+    except Exception as exc:
+        logger.warning(f"[CLASSIFY] Bỏ qua PR curve ({algo}/{target_col}): {exc}")
+
+
+def _plot_calibration_curve(
+    model, X_test: pd.DataFrame, y_test: pd.Series,
+    algo: str, target_col: str, out_dir: str,
+) -> None:
+    """Reliability diagram for binary probabilistic classifiers."""
+    if y_test.nunique() != 2 or not hasattr(model, "predict_proba"):
+        return
+    try:
+        positive = np.asarray(model.classes_)[1]
+        y_binary = (np.asarray(y_test) == positive).astype(int)
+        probabilities = model.predict_proba(X_test)[:, 1]
+        frac_positive, mean_pred = calibration_curve(
+            y_binary, probabilities, n_bins=10, strategy="quantile"
+        )
+        fig, ax = plt.subplots(figsize=(6.5, 5.5))
+        ax.plot([0, 1], [0, 1], linestyle="--", color="gray", label="Perfect calibration")
+        ax.plot(mean_pred, frac_positive, marker="o", linewidth=2, color="#4C72B0",
+                label=f"{algo}; positive={positive}")
+        ax.set_xlabel("Mean predicted probability")
+        ax.set_ylabel("Observed positive proportion")
+        ax.set_title(f"Calibration Curve — {algo} / {target_col}")
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.legend(fontsize=8)
+        ax.grid(alpha=0.25)
+        plt.tight_layout()
+        path = os.path.join(out_dir, f"calibration_{algo}_{target_col}.png")
+        fig.savefig(path, bbox_inches="tight", dpi=300)
+        plt.close(fig)
+    except Exception as exc:
+        logger.warning(f"[CLASSIFY] Bỏ qua calibration curve ({algo}/{target_col}): {exc}")
+
+
+def _plot_classification_comparison(results: list, out_dir: str) -> None:
+    if not results:
+        return
+    result_df = pd.DataFrame(results)
+    for target, target_df in result_df.groupby("target_col"):
+        metrics = [c for c in ["accuracy", "balanced_accuracy", "f1", "f1_macro"] if c in target_df]
+        if not metrics:
+            continue
+        plot_df = target_df.set_index("algorithm")[metrics]
+        fig, ax = plt.subplots(figsize=(10, 5))
+        plot_df.plot(kind="bar", ax=ax, colormap="tab10", edgecolor="black")
+        ax.set_ylim(0, 1.05)
+        ax.set_title(f"Hold-out model comparison — {target}")
+        ax.set_xlabel("Algorithm")
+        ax.set_ylabel("Score")
+        ax.tick_params(axis="x", rotation=25)
+        ax.legend(title="Metric", bbox_to_anchor=(1.02, 1), loc="upper left")
+        ax.grid(axis="y", alpha=0.25)
+        plt.tight_layout()
+        fig.savefig(os.path.join(out_dir, f"model_comparison_{target}.png"),
+                    bbox_inches="tight", dpi=300)
+        plt.close(fig)
 
 
 def _plot_feature_importance(
@@ -180,7 +300,7 @@ def _plot_feature_importance(
         importances = model.feature_importances_
     elif hasattr(model, "coef_"):
         coef = model.coef_
-        importances = np.abs(coef[0] if coef.ndim > 1 else coef)
+        importances = np.mean(np.abs(coef), axis=0) if coef.ndim > 1 else np.abs(coef)
     if importances is None or len(importances) == 0:
         return
     n_show = min(20, len(feature_names))
@@ -191,12 +311,13 @@ def _plot_feature_importance(
     ax.barh(range(n_show), top_vals[::-1], color="#4C72B0", edgecolor="black", height=0.7)
     ax.set_yticks(range(n_show))
     ax.set_yticklabels(top_names[::-1], fontsize=9)
-    ax.set_xlabel("Importance")
+    importance_label = "Absolute model coefficient" if hasattr(model, "coef_") else "Impurity-based importance"
+    ax.set_xlabel(importance_label)
     ax.set_title(f"Feature Importance — {algo} / {target_col} (Top {n_show})")
     plt.tight_layout()
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     path = os.path.join(out_dir, f"feat_imp_{algo}_{target_col}.png")
-    fig.savefig(path, bbox_inches="tight", dpi=150)
+    fig.savefig(path, bbox_inches="tight", dpi=300)
     plt.close(fig)
     logger.info(f"[CLASSIFY] Feature importance → {path}")
 
@@ -221,9 +342,10 @@ class ClassificationPipeline:
         EstimatorClass = ALGO_MAP[algo_name]
         # Chỉ truyền random_state nếu estimator hỗ trợ
         try:
-            self.model = EstimatorClass(random_state=random_state, **kwargs)
+            self.estimator = EstimatorClass(random_state=random_state, **kwargs)
         except TypeError:
-            self.model = EstimatorClass(**kwargs)
+            self.estimator = EstimatorClass(**kwargs)
+        self.model = None
         self.algorithm = algo_name
         self.random_state = random_state
 
@@ -255,8 +377,45 @@ class ClassificationPipeline:
         if feature_cols is None:
             feature_cols = [c for c in df.columns if c != target_col]
 
-        X = df[feature_cols].select_dtypes(include="number")
+        X = df[feature_cols].copy()
         y = df[target_col]
+
+        ds_viz_cfg = (
+            ((config.get("datasets", {}) or {}).get(dataset_name, {}) or {})
+            .get("visualization", {}) or {}
+        )
+        configured_categorical = set(ds_viz_cfg.get("categorical_columns", []))
+        categorical_cols = [
+            c for c in X.columns
+            if c in configured_categorical
+            or X[c].dtype == "object"
+            or str(X[c].dtype) in {"category", "bool"}
+        ]
+        numeric_cols = [c for c in X.columns if c not in categorical_cols]
+        transformers = []
+        if numeric_cols:
+            transformers.append((
+                "numeric",
+                Pipeline([
+                    ("imputer", SimpleImputer(strategy="median")),
+                    ("scaler", StandardScaler()),
+                ]),
+                numeric_cols,
+            ))
+        if categorical_cols:
+            transformers.append((
+                "categorical",
+                Pipeline([
+                    ("imputer", SimpleImputer(strategy="most_frequent")),
+                    ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
+                ]),
+                categorical_cols,
+            ))
+        preprocessor = ColumnTransformer(transformers=transformers, remainder="drop")
+        model_template = Pipeline([
+            ("preprocess", preprocessor),
+            ("model", self.estimator),
+        ])
 
         # Log phân phối nhãn — kiểm tra imbalance
         dist = y.value_counts(normalize=True)
@@ -268,10 +427,7 @@ class ClassificationPipeline:
             )
 
         # Compute model path trước khi split — dùng để kiểm tra checkpoint
-        out_dir = os.path.join(
-            config.get("base_output_dir", "outputs"),
-            dataset_name, "models"
-        )
+        out_dir = str(dataset_output_root(config, dataset_name) / "models")
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         model_path = os.path.join(out_dir, f"clf_{self.algorithm}_{target_col}.joblib")
 
@@ -284,12 +440,11 @@ class ClassificationPipeline:
         )
 
         # Resume từ checkpoint nếu model đã tồn tại — bỏ qua bước fit
-        if Path(model_path).exists():
+        if Path(model_path).exists() and not config.get("_force_retrain", False):
             logger.info(f"[CLASSIFY] Nạp model từ checkpoint → {model_path}")
             self.model = joblib.load(model_path)
-            if hasattr(self.model, "n_jobs"):
-                self.model.set_params(n_jobs=1)
         else:
+            self.model = model_template
             self.model.fit(X_train, y_train)
             joblib.dump(self.model, model_path)
             logger.info(f"[CLASSIFY] Model đã lưu → {model_path}")
@@ -300,6 +455,8 @@ class ClassificationPipeline:
         prec = precision_score(y_test, y_pred, average="weighted", zero_division=0)
         rec = recall_score(y_test, y_pred, average="weighted", zero_division=0)
         f1 = f1_score(y_test, y_pred, average="weighted", zero_division=0)
+        f1_macro = f1_score(y_test, y_pred, average="macro", zero_division=0)
+        balanced_acc = balanced_accuracy_score(y_test, y_pred)
         cm = confusion_matrix(y_test, y_pred)
 
         logger.info(
@@ -309,10 +466,7 @@ class ClassificationPipeline:
         logger.info(f"[CLASSIFY] Confusion Matrix:\n{cm}")
 
         # ── Trực quan hóa ────────────────────────────────────────────────────────
-        viz_dir = os.path.join(
-            config.get("base_output_dir", "outputs"),
-            dataset_name, "ml", "classification"
-        )
+        viz_dir = str(dataset_output_root(config, dataset_name) / "ml" / "classification")
         labels = sorted(y.unique().tolist())
         holdout_metrics = {
             "algorithm": self.algorithm,
@@ -324,6 +478,8 @@ class ClassificationPipeline:
             "precision_weighted": round(prec, 4),
             "recall_weighted": round(rec, 4),
             "f1_weighted": round(f1, 4),
+            "f1_macro": round(f1_macro, 4),
+            "balanced_accuracy": round(balanced_acc, 4),
         }
         _export_classification_metrics(
             y_test,
@@ -340,7 +496,15 @@ class ClassificationPipeline:
             self.algorithm, target_col, viz_dir
         )
         _plot_roc_curve(self.model, X_test, y_test, self.algorithm, target_col, viz_dir)
-        _plot_feature_importance(self.model, list(X.columns), self.algorithm, target_col, viz_dir)
+        _plot_precision_recall_curve(self.model, X_test, y_test, self.algorithm, target_col, viz_dir)
+        _plot_calibration_curve(self.model, X_test, y_test, self.algorithm, target_col, viz_dir)
+        try:
+            estimator = self.model.named_steps["model"]
+            feature_names = self.model.named_steps["preprocess"].get_feature_names_out().tolist()
+            feature_names = [name.split("__", 1)[-1] for name in feature_names]
+            _plot_feature_importance(estimator, feature_names, self.algorithm, target_col, viz_dir)
+        except Exception as exc:
+            logger.warning(f"[CLASSIFY] Bỏ qua feature importance ({self.algorithm}/{target_col}): {exc}")
 
         # ── StratifiedKFold CV (song song với Hold-out) ───────────────────────────
         n_splits = clf_cfg.get("cv_n_splits", 5)
@@ -353,6 +517,8 @@ class ClassificationPipeline:
             scoring={
                 "accuracy":  "accuracy",
                 "f1":        "f1_weighted",
+                "f1_macro":  "f1_macro",
+                "balanced_accuracy": "balanced_accuracy",
                 "precision": "precision_weighted",
                 "recall":    "recall_weighted",
             },
@@ -380,6 +546,8 @@ class ClassificationPipeline:
             "precision":        round(prec, 4),
             "recall":           round(rec, 4),
             "f1":               round(f1, 4),
+            "f1_macro":         round(f1_macro, 4),
+            "balanced_accuracy": round(balanced_acc, 4),
             "cv_accuracy_mean": cv_acc_mean,
             "cv_accuracy_std":  cv_acc_std,
             "cv_f1_mean":       cv_f1_mean,
@@ -462,18 +630,26 @@ def run_classification(
     )
 
     all_results = []
-    out_dir = os.path.join(config.get("base_output_dir", "outputs"), dataset_name, "ml", "classification")
+    out_dir = str(dataset_output_root(config, dataset_name) / "ml" / "classification")
     Path(out_dir).mkdir(parents=True, exist_ok=True)
 
     for target_col in target_columns:
+        feature_cols = [c for c in df.columns if c not in target_columns]
         for algo, algo_kwargs in algo_map.items():
             logger.info(f"[CLASSIFY] Bắt đầu: algo={algo}, target={target_col}")
             try:
                 pipeline = ClassificationPipeline(algo, random_state=random_state, **algo_kwargs)
-                result = pipeline.run(df, target_col, dataset_name, merged_config)
+                result = pipeline.run(
+                    df,
+                    target_col,
+                    dataset_name,
+                    merged_config,
+                    feature_cols=feature_cols,
+                )
                 all_results.append(result)
             except Exception as e:
                 logger.error(f"[CLASSIFY] Lỗi {algo}/{target_col}: {e}", exc_info=True)
 
+    _plot_classification_comparison(all_results, out_dir)
     logger.info(f"[CLASSIFY] Hoàn thành — {len(all_results)} run(s)")
     return all_results

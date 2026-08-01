@@ -225,19 +225,54 @@ def _load_group_c_dataframe(dataset_name: str, config: dict):
                 df = df.copy()
                 metadata.loc[:, "fname"] = metadata["fname"].astype(str).str.replace("\\", "/", regex=False)
                 df.loc[:, "fname"] = df["path"].map(_relative_media_path)
-                merge_cols = [
-                    c for c in ["fname", "dataset", "label", "sublabel"]
+                def _media_key(path_value: str) -> str:
+                    """Normalize renamed PhysioNet training files to one stable key."""
+                    stem = Path(str(path_value).replace("\\", "/")).stem.lower()
+                    if stem.startswith("btraining_"):
+                        stem = stem[len("btraining_"):]
+                    for prefix, replacement in (
+                        ("normal_btraining_noisynormal_", "noisynormal_"),
+                        ("murmur_btraining_noisymurmur_", "noisymurmur_"),
+                        ("normal_noisynormal_", "noisynormal_"),
+                        ("murmur_noisymurmur_", "noisymurmur_"),
+                    ):
+                        if stem.startswith(prefix):
+                            stem = replacement + stem[len(prefix):]
+                    while "__" in stem:
+                        stem = stem.replace("__", "_")
+                    return stem
+
+                metadata.loc[:, "_media_key"] = metadata["fname"].map(_media_key)
+                df.loc[:, "_media_key"] = df["fname"].map(_media_key)
+                merge_cols = ["_media_key"] + [
+                    c for c in ["dataset", "label", "sublabel"]
                     if c in metadata.columns
                 ]
+                metadata = metadata[merge_cols].drop_duplicates("_media_key", keep="first")
                 df = df.drop(
-                    columns=[c for c in merge_cols if c != "fname" and c in df.columns],
+                    columns=[c for c in merge_cols if c != "_media_key" and c in df.columns],
                     errors="ignore",
                 )
-                df = df.merge(metadata[merge_cols], on="fname", how="left")
+                df = df.merge(metadata, on="_media_key", how="left").drop(columns="_media_key")
 
     if "label" in df.columns and df["label"].isna().any() and "path" in df.columns:
-        fallback = df["path"].map(lambda p: Path(str(p)).stem.split("__", 1)[0])
+        def _fallback_audio_label(path_value: str) -> str:
+            stem = Path(str(path_value)).stem.lower()
+            for label in ("normal", "murmur", "extrastole", "artifact", "extrahls"):
+                if stem.startswith(label):
+                    return label
+            if stem.startswith(("aunlabelledtest", "bunlabelledtest")):
+                return "unlabelled"
+            return stem.split("__", 1)[0]
+
+        fallback = df["path"].map(_fallback_audio_label)
         df.loc[:, "label"] = df["label"].fillna(fallback)
+
+    if "dataset" in df.columns and df["dataset"].isna().any() and "path" in df.columns:
+        fallback_dataset = df["path"].map(
+            lambda p: "a" if Path(str(p)).parent.name.lower() == "set_a" else "b"
+        )
+        df.loc[:, "dataset"] = df["dataset"].fillna(fallback_dataset)
 
     return df
 
@@ -281,6 +316,7 @@ def run_classification_task(
     dataset_name: str, config: dict, algo_filter: Optional[str] = None
 ) -> None:
     """Chạy classification pipeline."""
+    from src.data.loader import load_tabular
     from src.domain.classification import run_classification
 
     step = "classification"
@@ -288,14 +324,18 @@ def run_classification_task(
         logger.info(f"[SKIP] Classification đã hoàn thành — {dataset_name}")
         return
 
-    interim_path = Path(config.get("base_data_dir", "data")) / "interim" / f"{dataset_name}_transformed.parquet"
+    from src.infrastructure.output_paths import transformed_interim_path
+    interim_path = transformed_interim_path(config, dataset_name)
     if not interim_path.exists():
         logger.warning(f"[CLASSIFY] Chưa có dữ liệu transformed. Chạy EDA trước.")
         run_eda_task(dataset_name, config)
 
     try:
-        import pandas as pd
-        df = pd.read_parquet(interim_path)
+        ds_cfg = config.get("datasets", {}).get(dataset_name, {})
+        df = load_tabular(ds_cfg.get("file", ""))
+        drop_cols = [c for c in ds_cfg.get("drop_columns", []) if c in df.columns]
+        if drop_cols:
+            df = df.drop(columns=drop_cols)
         run_classification(df, dataset_name, config, algo_filter=algo_filter)
         mark_done(dataset_name, step)
         logger.info(f"[DONE] Classification — {dataset_name}")
@@ -318,15 +358,13 @@ def run_regression_task(
         return
 
     ds_cfg = config.get("datasets", {}).get(dataset_name, {})
-    interim_path = Path(config.get("base_data_dir", "data")) / "interim" / f"{dataset_name}_transformed.parquet"
 
     try:
-        import pandas as pd
-        if interim_path.exists():
-            df = pd.read_parquet(interim_path)
-        else:
-            datetime_col = ds_cfg.get("datetime_col", "date")
-            df = load_timeseries(ds_cfg.get("file", ""), datetime_col)
+        # Model-time lag and rolling features are built from the source series.
+        # EDA transformations may use interpolation/capping for description and
+        # must not leak their full-dataset statistics into forecasting.
+        datetime_col = ds_cfg.get("datetime_col", "date")
+        df = load_timeseries(ds_cfg.get("file", ""), datetime_col)
 
         run_regression(df, dataset_name, config, algo_filter=algo_filter)
         mark_done(dataset_name, step)
@@ -346,7 +384,8 @@ def run_clustering_task(dataset_name: str, config: dict) -> None:
         logger.info(f"[SKIP] Clustering đã hoàn thành — {dataset_name}")
         return
 
-    interim_path = Path(config.get("base_data_dir", "data")) / "interim" / f"{dataset_name}_transformed.parquet"
+    from src.infrastructure.output_paths import transformed_interim_path
+    interim_path = transformed_interim_path(config, dataset_name)
 
     try:
         import pandas as pd
@@ -464,11 +503,6 @@ def main() -> None:
     # Kiểm tra môi trường khi khởi động
     validate_environment()
 
-    if args.reset:
-        from src.infrastructure.checkpoint import reset_step
-        reset_step(args.dataset)
-        logger.info(f"[RESET] Đã xóa checkpoint cho '{args.dataset}'")
-
     # Điều hướng task
     # --dataset all: lặp qua tất cả datasets trong config
     datasets_to_run: list
@@ -483,6 +517,16 @@ def main() -> None:
             )
             raise SystemExit(1)
         datasets_to_run = [args.dataset]
+
+    if args.reset:
+        from src.infrastructure.checkpoint import reset_step
+        for ds_name in datasets_to_run:
+            reset_step(ds_name, None if args.task == "all" else args.task)
+        config["_force_retrain"] = True
+        logger.info(
+            f"[RESET] Đã xóa checkpoint cho {len(datasets_to_run)} dataset(s); "
+            "không chủ động xóa output; các artifact cùng tên sẽ được tái tạo."
+        )
 
     for ds_name in datasets_to_run:
         logger.info(f"[START-DS] Bắt đầu dataset={ds_name} | task={args.task}")

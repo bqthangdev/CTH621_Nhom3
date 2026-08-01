@@ -113,8 +113,8 @@ Mặc dù trang UCI ghi nhận "không có giá trị thiếu", phân tích tệ
 |:-------|-------:|:--------------|:--------------------|
 | Giá trị thiếu có cấu trúc (NaN do chưa vận hành) | 22.133–87.299 bản ghi | `solar`, `wind`, `india_adani`, `nepal` | Điền 0 cho giai đoạn trước vận hành; kiểm tra ngày bắt đầu của từng nguồn |
 | Ngoại lệ cực đoan `generation_mw` | 1 bản ghi | `generation_mw` | Loại bỏ hoặc điều chỉnh theo `demand_mw` tương ứng |
-| Giá trị `demand_mw` bất thường (>50.000 MW) | ~22 bản ghi | `demand_mw` | Loại bỏ hoặc đánh dấu outlier |
-| Dấu thời gian trùng lặp | 813 bản ghi | `datetime` | Deduplication theo tiêu chí nhất quán |
+| Giá trị `demand_mw` bất thường (>50.000 MW) | 8 bản ghi | `demand_mw` | Xác minh nguồn trước khi loại hoặc hiệu chỉnh |
+| Dấu thời gian trùng lặp | 381 mốc; 813 bản ghi trong nhóm trùng; 432 bản ghi dư | `datetime` | Deduplication theo tiêu chí nhất quán |
 | Tần suất không đều (1h + 30min) | 8.336 khoảng cách 30 phút | `datetime` | Resampling về tần suất 1 giờ (`resample('1h').mean()` hoặc `.last()`) |
 
 ---
@@ -129,7 +129,7 @@ Islam, Turja và Habib (2025) [1] trình bày phương pháp dự báo phụ t�
 
 **Phương pháp đề xuất:** Nhóm tác giả đề xuất một **pipeline tiền xử lý và trích xuất đặc trưng** kết hợp ba nguồn dữ liệu: (1) dữ liệu phụ tải từ PGCB, (2) dữ liệu thời tiết (*environmental features* — nhiệt độ, độ ẩm, lượng mưa), và (3) dữ liệu kinh tế (*economic features* — chỉ số giá tiêu dùng, tốc độ tăng trưởng GDP). Phương pháp tạo ra bộ đặc trưng phong phú gồm: đặc trưng thời gian (*temporal features*: giờ trong ngày, ngày trong tuần, tháng, ngày lễ), đặc trưng trễ (*lag features*: phụ tải giờ trước, hôm trước, tuần trước), và đặc trưng trung bình động (*rolling mean features*). Kết hợp đặc trưng đa nguồn này nhằm cải thiện dự báo cả ngắn hạn (giờ tiếp theo) lẫn trung hạn (nhiều ngày đến vài tuần).
 
-**Kết quả:** Mô hình đề xuất đạt **MAPE 2,3%** trên tập dữ liệu PGCB khi dự báo phụ tải tháng 1 [1]. Đây là kết quả tốt nhất được báo cáo trong nghiên cứu, phản ánh hiệu quả của chiến lược kết hợp đặc trưng đa nguồn so với các baseline chỉ sử dụng dữ liệu phụ tải lịch sử đơn thuần. Chi tiết đầy đủ về bảng so sánh các mô hình, kết quả RMSE/MAE theo từng kịch bản thời gian và phân tích tầm quan trọng đặc trưng đang chờ xác nhận từ toàn văn bài báo (xem Ghi chú).
+**Kết quả:** Mô hình đề xuất đạt **MAPE 2,3%** khi dự báo nhu cầu tháng 1 [1]. Mốc này phản ánh nhiệm vụ dự báo `demand_mw` có thêm đặc trưng thời tiết, kinh tế và lịch; không được xem là đối sánh trực tiếp với pipeline CTH621, vốn dự báo `generation_mw` từ các biến trong tệp vận hành.
 
 **Ý nghĩa:** Nghiên cứu đặt nền tảng cho các hệ thống điều phối lưới điện thông minh (*smart grid dispatch*) tại Bangladesh, hỗ trợ lập kế hoạch vận hành ngắn hạn và tối ưu hóa cơ cấu nguồn điện để giảm chi phí và cắt tải.
 
@@ -148,13 +148,13 @@ Bài toán dự báo phụ tải điện là bài toán **hồi quy chuỗi th�
 | Mean Absolute Percentage Error | *MAPE* | $\frac{100}{n}\sum\left|\frac{y_i-\hat{y}_i}{y_i}\right|$ | Sai số phần trăm trung bình (%) | Cho phép so sánh tương đối giữa các hệ thống điện quy mô khác nhau; bài báo [1] sử dụng MAPE là chỉ số chính |
 | Coefficient of Determination | $R^2$ | $1 - \frac{SS_{res}}{SS_{tot}}$ | Tỷ lệ phương sai được giải thích bởi mô hình | Từ 0 đến 1; giá trị gần 1 nghĩa là mô hình khớp tốt với dữ liệu |
 
-Trong khuôn khổ dự án CTH621, **RMSE và MAPE** là hai chỉ số ưu tiên, phù hợp với thông lệ trong lĩnh vực dự báo phụ tải điện. $R^2$ được báo cáo bổ sung. Phân chia dữ liệu theo phương pháp **Chronological Split**: dữ liệu năm 2015–2023 dùng làm tập huấn luyện, năm 2024 dùng làm tập kiểm tra — đảm bảo không có rò rỉ thông tin tương lai vào quá trình học.
+Trong pipeline CTH621 hiện hành, biến mục tiêu là `generation_mw`; các chỉ số được xuất là MAE, RMSE và \(R^2\). Dữ liệu được chia theo thứ tự thời gian với 85% quan sát đầu cho huấn luyện và 15% quan sát cuối cho kiểm thử, đồng thời dùng TimeSeriesSplit 5 phần để khảo sát độ ổn định. Cấu hình này khác nhiệm vụ `demand_mw` và giao thức của nghiên cứu tham khảo.
 
 ---
 
 #### Tài liệu Tham khảo (mục 2.2.3)
 
-[1] M. T. Islam, S. A. Turja, and A. Habib, "Enhanced power demand forecasting for Bangladesh: using feature engineering associated with environmental and economic impact," *Journal of Data, Information and Management*, Springer, 2025, doi: [10.1007/s42488-025-00140-9](https://doi.org/10.1007/s42488-025-00140-9).
+[1] M. T. Islam, S. A. Turja, and A. Habib, "Enhanced power demand forecasting for Bangladesh: using feature engineering associated with environmental and economic impact," *Journal of Data, Information and Management*, vol. 7, pp. 1–19, 2025, doi: [10.1007/s42488-025-00140-9](https://doi.org/10.1007/s42488-025-00140-9).
 
 ---
 
@@ -187,21 +187,3 @@ Trong khuôn khổ dự án CTH621, **RMSE và MAPE** là hai chỉ số ưu ti�
 - IEEE: `[1] M. T. Islam, S. A. Turja, and A. Habib, "Enhanced power demand forecasting for Bangladesh: using feature engineering associated with environmental and economic impact," *Journal of Data, Information and Management*, Springer, 2025, doi: 10.1007/s42488-025-00140-9.`
 
 - APA: `Islam, M. T., Turja, S. A., & Habib, A. (2025). Enhanced power demand forecasting for Bangladesh: using feature engineering associated with environmental and economic impact. *Journal of Data, Information and Management*. Springer. https://doi.org/10.1007/s42488-025-00140-9`
-
----
-
-## Ghi chú cần bổ sung
-
-**[GHI CHÚ 1 — Kết quả đầy đủ từ bài báo gốc]**
-
-Trang Springer yêu cầu đăng nhập để truy cập toàn văn bài báo [1] — không thể trích xuất tự động tại thời điểm soạn thảo. Kết quả duy nhất truy xuất được từ đoạn trích Google Scholar là **MAPE = 2,3%** trên tập kiểm tra tháng 1. Các thông tin sau cần được bổ sung thủ công sau khi đọc toàn văn:
-
-- Mô hình học máy được sử dụng (Random Forest, LSTM, XGBoost, ...?)
-- Bảng so sánh hiệu suất: RMSE, MAE, $R^2$ theo từng mô hình và horizon dự báo
-- Danh sách cụ thể các đặc trưng thời tiết và kinh tế được tích hợp
-- Chiến lược phân chia tập huấn luyện/kiểm tra trong nghiên cứu gốc
-- Kết quả dự báo trung hạn (nhiều ngày / nhiều tuần)
-
-**[GHI CHÚ 2 — Năm xuất bản và tên tạp chí]**
-
-Bài báo [1] được xác nhận đăng trên **Journal of Data, Information and Management** (Springer) năm 2025 (từ Google Scholar và trang UCI). Tuy nhiên, số tập và số trang cụ thể chưa truy xuất được — cần bổ sung khi có quyền truy cập toàn văn.

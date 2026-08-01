@@ -16,6 +16,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import seaborn as sns
 from sklearn.base import clone
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import Lasso, LinearRegression, Ridge
@@ -25,6 +26,7 @@ from sklearn.svm import SVR
 
 from src.domain.classification import _append_summary
 from src.infrastructure.logger import get_logger
+from src.infrastructure.output_paths import dataset_output_root
 
 logger = get_logger(__name__)
 
@@ -41,7 +43,13 @@ _SKLEARN_REG_MAP: dict = {
 # Feature Engineering — Rolling Window
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_lag_features(df: pd.DataFrame, target_col: str, lags: list, rolling_windows: list) -> pd.DataFrame:
+def build_lag_features(
+    df: pd.DataFrame,
+    target_col: str,
+    lags: list,
+    rolling_windows: list,
+    group_col: Optional[str] = None,
+) -> pd.DataFrame:
     """
     Tạo lag features và rolling mean features cho XGBoost.
 
@@ -55,10 +63,21 @@ def build_lag_features(df: pd.DataFrame, target_col: str, lags: list, rolling_wi
         DataFrame đã thêm các cột lag và rolling, đã dropna.
     """
     df = df.copy(deep=True)
-    for lag in lags:
-        df.loc[:, f"lag_{lag}"] = df[target_col].shift(lag)
-    for w in rolling_windows:
-        df.loc[:, f"rolling_mean_{w}"] = df[target_col].rolling(w).mean()
+    use_group = group_col if group_col and group_col in df.columns else None
+    if use_group:
+        grouped = df.groupby(use_group, sort=False)[target_col]
+        for lag in lags:
+            df.loc[:, f"lag_{lag}"] = grouped.shift(lag)
+        for w in rolling_windows:
+            df.loc[:, f"rolling_mean_{w}"] = grouped.transform(
+                lambda values: values.shift(1).rolling(w, min_periods=w).mean()
+            )
+    else:
+        for lag in lags:
+            df.loc[:, f"lag_{lag}"] = df[target_col].shift(lag)
+        for w in rolling_windows:
+            # Shift first so y_t is never included in a feature used to predict y_t.
+            df.loc[:, f"rolling_mean_{w}"] = df[target_col].shift(1).rolling(w).mean()
     df = df.dropna()
     return df
 
@@ -79,8 +98,14 @@ def chronological_split(df: pd.DataFrame, train_ratio: float = 0.8):
     Returns:
         (train_df, test_df)
     """
-    split_idx = int(len(df) * train_ratio)
-    train, test = df.iloc[:split_idx], df.iloc[split_idx:]
+    if isinstance(df.index, pd.DatetimeIndex) and df.index.nunique() > 1:
+        unique_times = pd.DatetimeIndex(df.index.unique()).sort_values()
+        split_idx = min(max(1, int(len(unique_times) * train_ratio)), len(unique_times) - 1)
+        cutoff = unique_times[split_idx - 1]
+        train, test = df[df.index <= cutoff], df[df.index > cutoff]
+    else:
+        split_idx = int(len(df) * train_ratio)
+        train, test = df.iloc[:split_idx], df.iloc[split_idx:]
     logger.info(
         f"[REGRESSION] Chronological split — "
         f"Train: {len(train)} ({train.index.min()} → {train.index.max()}) | "
@@ -163,13 +188,30 @@ def _cv_timeseries(
 
 
 def _plot_predictions(y_true, y_pred, title: str, out_path: str) -> None:
-    fig, ax = plt.subplots(figsize=(12, 4))
-    ax.plot(y_true.values, label="Thực tế", linewidth=1, color="#4C72B0")
-    ax.plot(y_pred, label="Dự đoán", linewidth=1, color="#DD8452", linestyle="--")
+    y_true_values = np.asarray(y_true)
+    y_pred_values = np.asarray(y_pred)
+    max_points = 15000
+    if len(y_true_values) > max_points:
+        positions = np.linspace(0, len(y_true_values) - 1, max_points, dtype=int)
+    else:
+        positions = np.arange(len(y_true_values))
+    if isinstance(getattr(y_true, "index", None), pd.DatetimeIndex) and y_true.index.is_unique:
+        x_values = y_true.index[positions]
+        x_label = "Time"
+    else:
+        x_values = positions
+        x_label = "Test observation (chronological order)"
+    fig, ax = plt.subplots(figsize=(12, 4.8))
+    ax.plot(x_values, y_true_values[positions], label="Observed", linewidth=1, color="#4C72B0")
+    ax.plot(x_values, y_pred_values[positions], label="Predicted", linewidth=1,
+            color="#DD8452", linestyle="--")
     ax.set_title(title)
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(getattr(y_true, "name", None) or "Target value")
     ax.legend()
+    ax.grid(alpha=0.25)
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, bbox_inches="tight", dpi=150)
+    fig.savefig(out_path, bbox_inches="tight", dpi=300)
     plt.close(fig)
     logger.info(f"[REGRESSION] Đã lưu biểu đồ dự đoán → {out_path}")
 
@@ -195,9 +237,74 @@ def _plot_residuals(y_true, y_pred, title: str, out_path: str) -> None:
 
     plt.tight_layout()
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, bbox_inches="tight", dpi=150)
+    fig.savefig(out_path, bbox_inches="tight", dpi=300)
     plt.close(fig)
     logger.info(f"[REGRESSION] Residual plot → {out_path}")
+
+
+def _plot_regression_diagnostics(y_true, y_pred, title: str, out_dir: str, stem: str) -> None:
+    """Actual-vs-predicted, residual distribution, and Q-Q diagnostics."""
+    from scipy import stats
+
+    observed = np.asarray(y_true, dtype=float)
+    predicted = np.asarray(y_pred, dtype=float)
+    residuals = observed - predicted
+    max_points = 20000
+    if len(observed) > max_points:
+        positions = np.linspace(0, len(observed) - 1, max_points, dtype=int)
+        observed_plot = observed[positions]
+        predicted_plot = predicted[positions]
+        residual_plot = residuals[positions]
+    else:
+        observed_plot, predicted_plot, residual_plot = observed, predicted, residuals
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    axes[0].scatter(observed_plot, predicted_plot, s=12, alpha=0.35, color="#4C72B0")
+    low = float(np.nanmin([observed_plot.min(), predicted_plot.min()]))
+    high = float(np.nanmax([observed_plot.max(), predicted_plot.max()]))
+    axes[0].plot([low, high], [low, high], "--", color="red", linewidth=1.2)
+    axes[0].set_title(f"Observed vs predicted — {title}")
+    axes[0].set_xlabel("Observed")
+    axes[0].set_ylabel("Predicted")
+    axes[0].set_aspect("equal", adjustable="box")
+    sns.histplot(residual_plot, bins=40, kde=True, color="#DD8452", ax=axes[1])
+    axes[1].axvline(0, linestyle="--", color="black", linewidth=1)
+    axes[1].set_title("Residual distribution")
+    axes[1].set_xlabel("Residual (observed − predicted)")
+    axes[1].set_ylabel("Number of observations")
+    plt.tight_layout()
+    fig.savefig(os.path.join(out_dir, f"diagnostic_{stem}.png"), bbox_inches="tight", dpi=300)
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    stats.probplot(residual_plot, dist="norm", plot=ax)
+    ax.set_title(f"Residual Q–Q plot — {title}")
+    fig.savefig(os.path.join(out_dir, f"qq_{stem}.png"), bbox_inches="tight", dpi=300)
+    plt.close(fig)
+
+
+def _plot_regression_comparison(results: list, out_dir: str, target_col: str) -> None:
+    if not results:
+        return
+    frame = pd.DataFrame(results).set_index("algorithm")
+    fig, axes = plt.subplots(1, 2, figsize=(13, 4.8))
+    frame[[c for c in ["mae", "rmse"] if c in frame]].plot(
+        kind="bar", ax=axes[0], color=["#4C72B0", "#DD8452"], edgecolor="black"
+    )
+    axes[0].set_title(f"Error comparison — {target_col}")
+    axes[0].set_xlabel("Algorithm")
+    axes[0].set_ylabel("Error in target units (lower is better)")
+    axes[0].tick_params(axis="x", rotation=25)
+    frame[["r2"]].plot(kind="bar", ax=axes[1], color="#55A868", edgecolor="black", legend=False)
+    axes[1].axhline(0, color="black", linewidth=1)
+    axes[1].set_title(f"R² comparison — {target_col}")
+    axes[1].set_xlabel("Algorithm")
+    axes[1].set_ylabel("R² (higher is better)")
+    axes[1].tick_params(axis="x", rotation=25)
+    plt.tight_layout()
+    fig.savefig(os.path.join(out_dir, f"model_comparison_{target_col}.png"),
+                bbox_inches="tight", dpi=300)
+    plt.close(fig)
 
 
 class RegressionPipeline:
@@ -236,15 +343,15 @@ class RegressionPipeline:
         """
         reg_cfg = config.get("regression", {})
         train_ratio = reg_cfg.get("train_ratio", 0.8)
-        out_dir = os.path.join(
-            config.get("base_output_dir", "outputs"),
-            dataset_name, "ml", "regression"
-        )
-        model_dir = os.path.join(config.get("base_output_dir", "outputs"), dataset_name, "models")
+        dataset_root = dataset_output_root(config, dataset_name)
+        out_dir = str(dataset_root / "ml" / "regression")
+        model_dir = str(dataset_root / "models")
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         Path(model_dir).mkdir(parents=True, exist_ok=True)
 
-        if self.algorithm == "linear_regression":
+        if self.algorithm == "naive":
+            return self._run_naive(df, target_col, dataset_name, config, reg_cfg, train_ratio, out_dir)
+        elif self.algorithm == "linear_regression":
             return self._run_linear(df, target_col, dataset_name, config, train_ratio, out_dir, model_dir)
         elif self.algorithm == "xgboost":
             return self._run_xgboost(df, target_col, dataset_name, config, reg_cfg, train_ratio, out_dir, model_dir)
@@ -262,12 +369,14 @@ class RegressionPipeline:
         """
         lags = reg_cfg.get("lags", [1, 7, 14])
         windows = reg_cfg.get("rolling_windows", [7, 30])
-        df_feat = build_lag_features(df[[target_col]], target_col, lags, windows)
-        feature_cols = [c for c in df_feat.columns if c != target_col]
+        group_col = reg_cfg.get("series_group_col")
+        base_cols = [target_col] + ([group_col] if group_col and group_col in df.columns else [])
+        df_feat = build_lag_features(df[base_cols], target_col, lags, windows, group_col=group_col)
+        feature_cols = [c for c in df_feat.columns if c not in {target_col, group_col}]
         train, test = chronological_split(df_feat, train_ratio)
 
         model_path = os.path.join(model_dir, f"reg_{self.algorithm}_{target_col}.joblib")
-        if Path(model_path).exists():
+        if Path(model_path).exists() and not config.get("_force_retrain", False):
             logger.info(f"[REGRESSION] Nạp {self.algorithm} model từ checkpoint → {model_path}")
             self.model = joblib.load(model_path)
         else:
@@ -292,6 +401,10 @@ class RegressionPipeline:
             f"{self.algorithm} — {target_col}",
             os.path.join(out_dir, f"residual_{self.algorithm}_{target_col}.png"),
         )
+        _plot_regression_diagnostics(
+            test[target_col], y_pred, f"{self.algorithm} — {target_col}", out_dir,
+            f"{self.algorithm}_{target_col}",
+        )
         n_splits = reg_cfg.get("cv_n_splits", 5)
         X_feat_all = df_feat[feature_cols].values
         y_feat_all = df_feat[target_col]
@@ -304,7 +417,7 @@ class RegressionPipeline:
         X_train = np.arange(len(train)).reshape(-1, 1)
         X_test = np.arange(len(train), len(train) + len(test)).reshape(-1, 1)
         model_path = os.path.join(model_dir, f"reg_linear_{target_col}.joblib")
-        if Path(model_path).exists():
+        if Path(model_path).exists() and not config.get("_force_retrain", False):
             logger.info(f"[REGRESSION] Nạp Linear Regression model từ checkpoint → {model_path}")
             self.model = joblib.load(model_path)
         else:
@@ -317,6 +430,10 @@ class RegressionPipeline:
                           os.path.join(out_dir, f"linear_{target_col}.png"))
         _plot_residuals(test[target_col], y_pred, f"Linear Regression — {target_col}",
                         os.path.join(out_dir, f"residual_linear_{target_col}.png"))
+        _plot_regression_diagnostics(
+            test[target_col], y_pred, f"Linear Regression — {target_col}", out_dir,
+            f"linear_{target_col}",
+        )
         n_splits = config.get("regression", {}).get("cv_n_splits", 5)
         X_all = np.arange(len(df[[target_col]])).reshape(-1, 1)
         y_all = df[target_col]
@@ -331,15 +448,17 @@ class RegressionPipeline:
 
         lags = reg_cfg.get("lags", [1, 7, 14])
         windows = reg_cfg.get("rolling_windows", [7, 30])
-        df_feat = build_lag_features(df[[target_col]], target_col, lags, windows)
+        group_col = reg_cfg.get("series_group_col")
+        base_cols = [target_col] + ([group_col] if group_col and group_col in df.columns else [])
+        df_feat = build_lag_features(df[base_cols], target_col, lags, windows, group_col=group_col)
 
-        feature_cols = [c for c in df_feat.columns if c != target_col]
+        feature_cols = [c for c in df_feat.columns if c not in {target_col, group_col}]
         train, test = chronological_split(df_feat, train_ratio)
 
         early_stop = self.kwargs.pop("early_stopping_rounds", None)
         kwargs = {k: v for k, v in self.kwargs.items() if k != "early_stopping_rounds"}
         model_path = os.path.join(model_dir, f"reg_xgb_{target_col}.joblib")
-        if Path(model_path).exists():
+        if Path(model_path).exists() and not config.get("_force_retrain", False):
             logger.info(f"[REGRESSION] Nạp XGBoost model từ checkpoint → {model_path}")
             self.model = joblib.load(model_path)
         else:
@@ -377,6 +496,10 @@ class RegressionPipeline:
                           os.path.join(out_dir, f"xgb_{target_col}.png"))
         _plot_residuals(test[target_col], y_pred, f"XGBoost — {target_col}",
                         os.path.join(out_dir, f"residual_xgb_{target_col}.png"))
+        _plot_regression_diagnostics(
+            test[target_col], y_pred, f"XGBoost — {target_col}", out_dir,
+            f"xgb_{target_col}",
+        )
         # CV không dùng early_stopping_rounds (không hỗ trợ eval_set trong TimeSeriesSplit)
         n_splits = reg_cfg.get("cv_n_splits", 5)
         xgb_cv = XGBRegressor(random_state=self.random_state, **kwargs)
@@ -400,7 +523,7 @@ class RegressionPipeline:
         train_s, test_s = series.iloc[:split_idx], series.iloc[split_idx:]
 
         model_path = os.path.join(model_dir, f"reg_arima_{target_col}.pkl")
-        if Path(model_path).exists():
+        if Path(model_path).exists() and not config.get("_force_retrain", False):
             try:
                 from statsmodels.tsa.statespace.sarimax import SARIMAXResults
                 fitted = SARIMAXResults.load(model_path)
@@ -422,7 +545,28 @@ class RegressionPipeline:
         y_pred = fitted.forecast(steps=len(test_s))
         _plot_predictions(test_s, y_pred.values, f"ARIMA — {target_col}",
                           os.path.join(out_dir, f"arima_{target_col}.png"))
+        _plot_regression_diagnostics(
+            test_s, y_pred.values, f"ARIMA — {target_col}", out_dir,
+            f"arima_{target_col}",
+        )
         return _eval_metrics(test_s, y_pred.values, "arima", dataset_name, target_col, config)
+
+    def _run_naive(self, df, target_col, dataset_name, config, reg_cfg, train_ratio, out_dir):
+        lag = int(self.kwargs.get("lag", 1))
+        group_col = reg_cfg.get("series_group_col")
+        base_cols = [target_col] + ([group_col] if group_col and group_col in df.columns else [])
+        df_feat = build_lag_features(df[base_cols], target_col, [lag], [], group_col=group_col)
+        _, test = chronological_split(df_feat, train_ratio)
+        y_pred = test[f"lag_{lag}"].to_numpy()
+        title = f"Naive lag-{lag} baseline — {target_col}"
+        _plot_predictions(test[target_col], y_pred, title,
+                          os.path.join(out_dir, f"naive_lag_{lag}_{target_col}.png"))
+        _plot_residuals(test[target_col], y_pred, title,
+                        os.path.join(out_dir, f"residual_naive_lag_{lag}_{target_col}.png"))
+        _plot_regression_diagnostics(
+            test[target_col], y_pred, title, out_dir, f"naive_lag_{lag}_{target_col}"
+        )
+        return _eval_metrics(test[target_col], y_pred, "naive", dataset_name, target_col, config)
 
 
 def run_regression(
@@ -468,6 +612,7 @@ def run_regression(
     )
 
     all_results = []
+    out_dir = str(dataset_output_root(config, dataset_name) / "ml" / "regression")
     for algo, algo_kwargs in algo_map.items():
         logger.info(f"[REGRESSION] Bắt đầu: algo={algo}, target={target_col}")
         try:
@@ -477,5 +622,6 @@ def run_regression(
         except Exception as e:
             logger.error(f"[REGRESSION] Lỗi {algo}: {e}", exc_info=True)
 
+    _plot_regression_comparison(all_results, out_dir, target_col)
     logger.info(f"[REGRESSION] Hoàn thành — {len(all_results)} run(s)")
     return all_results

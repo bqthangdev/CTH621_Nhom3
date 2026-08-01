@@ -68,6 +68,8 @@ def mark_done(dataset: str, step: str) -> None:
         progress[dataset] = {}
     progress[dataset][step] = "DONE"
     progress[dataset][f"{step}_completed_at"] = datetime.now().isoformat()
+    progress[dataset].pop(f"{step}_failed_at", None)
+    progress[dataset].pop(f"{step}_reason", None)
     _save_progress(progress)
 
 

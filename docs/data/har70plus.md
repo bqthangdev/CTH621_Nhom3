@@ -136,7 +136,7 @@ Ustad và cộng sự (2023) [1] trình bày quá trình xây dựng và kiểm 
 
 **So sánh với mô hình nền (*baseline*):** Nhóm tác giả đồng thời kiểm định mô hình HAR được huấn luyện trên đối tượng trẻ tuổi (từ tập dữ liệu Acti4) trên cùng tập dữ liệu HAR70+, nhằm định lượng mức độ giảm hiệu suất khi thiếu tính đại diện về độ tuổi. Kết quả cho thấy mô hình chuyên biệt cho người cao tuổi (HAR70+ model) vượt trội so với mô hình tổng quát, xác nhận giả thuyết của nhóm nghiên cứu.
 
-**Kết quả:** Kết quả phân loại chi tiết (per-class sensitivity, specificity, F1-score) và kết quả tổng hợp (overall accuracy, macro-F1) không thể trích xuất trực tiếp do trang web MDPI hạn chế truy cập tự động tại thời điểm soạn thảo báo cáo này. Xem Ghi chú bên dưới về nguồn tham khảo thay thế và kế hoạch bổ sung.
+**Kết quả:** Nghiên cứu báo cáo Accuracy 91% khi mô hình được đánh giá trên HARTH và 94% trên HAR70+. Đối với nhóm người dùng dụng cụ hỗ trợ đi lại, Accuracy tăng từ 87% lên 93% sau khi bổ sung dữ liệu huấn luyện phù hợp. Các kết quả này cho thấy thiết kế đánh giá theo đối tượng và tính đại diện của tập huấn luyện có ảnh hưởng trực tiếp đến khả năng khái quát hóa.
 
 **Ý nghĩa:** Nghiên cứu đóng góp vào lĩnh vực *ambient assisted living (AAL)* và giám sát sức khỏe từ xa (*remote health monitoring*) cho người cao tuổi. Kết quả nghiên cứu có tiềm năng ứng dụng trong hệ thống phát hiện té ngã (*fall detection*), đánh giá mức độ hoạt động thể chất, và hỗ trợ phục hồi chức năng vận động.
 
@@ -157,7 +157,7 @@ Do bài toán gốc là **phân loại đa lớp** (*multi-class classification*
 | Độ đặc hiệu theo lớp | *Per-class Specificity* | Tỷ lệ bản ghi không thuộc lớp *k* được phân loại đúng là không thuộc *k* | Dùng trong bài báo gốc [1] cùng với sensitivity |
 | Ma trận nhầm lẫn | *Confusion Matrix* | Bảng TP/FP/FN/TN cho từng cặp lớp | Hữu ích để xác định các lớp dễ bị nhầm lẫn (ví dụ: walking vs. shuffling) |
 
-Trong khuôn khổ dự án CTH621, mô hình phân loại sẽ được đánh giá theo **Macro-F1** là chỉ số ưu tiên, nhằm đảm bảo hiệu suất nhất quán trên cả các lớp thiểu số (cầu thang). *Accuracy* được báo cáo bổ sung. Kiểm định sử dụng **LOSO-CV** (18 fold) theo phương pháp của bài báo gốc [1], hoặc **stratified k-fold** theo đối tượng nếu tài nguyên tính toán hạn chế.
+Các chỉ số trên phù hợp với nhiệm vụ phân loại hoạt động gốc. Trong pipeline CTH621 hiện hành, HAR70+ được dùng cho bài toán hồi quy `back_x` với phép chia theo thời gian; `label` được giữ để diễn giải và bị loại khỏi không gian đặc trưng của bài toán tương ứng. Vì khác nhiệm vụ, Accuracy của bài báo không được so sánh trực tiếp với MAE, RMSE hoặc \(R^2\) của dự án.
 
 ---
 
@@ -204,19 +204,6 @@ Trong khuôn khổ dự án CTH621, mô hình phân loại sẽ được đánh 
 
 ---
 
-## Ghi chú cần bổ sung
+## Lưu ý về mã nhãn
 
-**[GHI CHÚ 1 — Kết quả phân loại từ bài báo gốc]**
-
-Kết quả định lượng của mô hình HAR70+ (per-class F1, macro-F1, accuracy, confusion matrix) không thể trích xuất tự động từ trang MDPI do cơ chế bảo vệ bot của trang web. Các số liệu này cần được bổ sung thủ công sau khi đọc toàn văn bài báo [1] (có thể truy cập qua DOI [10.3390/s23052368](https://doi.org/10.3390/s23052368) — bài báo là *open access*).
-
-**Nội dung cần tra cứu và bổ sung:**
-- Kích thước cửa sổ thời gian (*window size*) sử dụng trong trích xuất đặc trưng
-- Danh sách đặc trưng được trích xuất (mean, std, energy, ...) và tổng số đặc trưng
-- Thuật toán phân loại được sử dụng (Random Forest, Gradient Boosting, ...)
-- Kết quả LOSO-CV: accuracy tổng thể, macro-F1, per-class sensitivity và specificity
-- Kết quả so sánh HAR70+ model với baseline model (Acti4 dataset)
-
-**[GHI CHÚ 2 — Mã nhãn và sự vắng mặt của nhãn 2]**
-
-Sơ đồ mã hóa nhãn hoạt động không liên tiếp (1, 3, 4, 5, 6, 7, 8 — bỏ qua nhãn 2). Điều này đã được xác nhận từ tài liệu UCI và phân tích dữ liệu thực tế. Nhãn 2 không xuất hiện trong bất kỳ tệp nào. Theo thiết kế của nhóm tác giả, các mã nhãn được giữ cố định để tương thích với sơ đồ mã hóa hoạt động trong các nghiên cứu nền tảng liên quan (có thể bao gồm hoạt động khác được đánh nhãn 2 nhưng không hiển diện trong giao thức HAR70+).
+Sơ đồ mã hóa hoạt động trong dữ liệu dùng cho dự án gồm các nhãn 1, 3, 4, 5, 6, 7 và 8. Nhãn 2 không xuất hiện trong bất kỳ tệp nguồn nào đã thu thập; báo cáo giữ nguyên mã gốc và không suy diễn nguyên nhân của khoảng trống này.

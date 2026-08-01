@@ -77,7 +77,7 @@ def load_timeseries(path: str, datetime_col: str) -> pd.DataFrame:
 
 def load_images(dir_path: str, extensions: tuple = (".jpg", ".jpeg", ".png", ".bmp", ".tiff")) -> list:
     """
-    Nạp toàn bộ ảnh từ thư mục, trích xuất metadata và pixel array.
+    Nạp toàn bộ ảnh từ thư mục và trích xuất metadata/đặc trưng số.
 
     Args:
         dir_path:   Đường dẫn thư mục chứa ảnh.
@@ -89,7 +89,8 @@ def load_images(dir_path: str, extensions: tuple = (".jpg", ".jpeg", ".png", ".b
             - width (int): chiều rộng
             - height (int): chiều cao
             - channels (int): số kênh màu
-            - array (np.ndarray): pixel array dạng uint8
+        Pixel array chỉ tồn tại trong lúc trích xuất feature; không giữ trong
+        record để tránh chiếm nhiều GB RAM với bộ ảnh lớn.
             - label (str): tên thư mục con (nếu có) dùng làm nhãn
     """
     try:
@@ -143,7 +144,6 @@ def load_images(dir_path: str, extensions: tuple = (".jpg", ".jpeg", ".png", ".b
                 "width": img.width,
                 "height": img.height,
                 "channels": arr.shape[2] if arr.ndim == 3 else 1,
-                "array": arr,
             }
             record.update(_image_features(arr))
             records.append(record)

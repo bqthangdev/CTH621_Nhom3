@@ -18,12 +18,13 @@ import pandas as pd
 import seaborn as sns
 from scipy.cluster.hierarchy import dendrogram, fcluster, linkage
 from sklearn.cluster import DBSCAN, KMeans
-from sklearn.metrics import silhouette_score
+from sklearn.metrics import silhouette_samples, silhouette_score
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
 from src.domain.classification import _append_summary
 from src.infrastructure.logger import get_logger
+from src.infrastructure.output_paths import dataset_output_root
 
 logger = get_logger(__name__)
 
@@ -85,7 +86,7 @@ def _sample_rows(
 
 def _savefig(fig, path: str) -> None:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, bbox_inches="tight", dpi=150)
+    fig.savefig(path, bbox_inches="tight", dpi=300)
     plt.close(fig)
     logger.info(f"[CLUSTER] Đã lưu biểu đồ → {path}")
 
@@ -148,6 +149,135 @@ def _plot_cluster_pca(
         _savefig(fig, os.path.join(out_dir, f"scatter_pca_{algo_name}.png"))
     except Exception as e:
         logger.warning(f"[CLUSTER] Bỏ qua PCA scatter ({algo_name}): {e}")
+
+
+def _embedding_sample_indices(
+    labels: np.ndarray, max_samples: int, random_state: int,
+) -> np.ndarray:
+    """Sample reproducibly while retaining observations from small clusters."""
+    labels = np.asarray(labels)
+    if len(labels) <= max_samples:
+        return np.arange(len(labels))
+    rng = np.random.RandomState(random_state)
+    selected = []
+    unique_labels, counts = np.unique(labels, return_counts=True)
+    for cluster_id, count in zip(unique_labels, counts):
+        cluster_idx = np.flatnonzero(labels == cluster_id)
+        allocation = max(2, int(round(max_samples * count / len(labels))))
+        allocation = min(allocation, len(cluster_idx))
+        selected.extend(rng.choice(cluster_idx, size=allocation, replace=False).tolist())
+    selected = np.unique(selected)
+    if len(selected) > max_samples:
+        selected = rng.choice(selected, size=max_samples, replace=False)
+    elif len(selected) < max_samples:
+        remaining = np.setdiff1d(np.arange(len(labels)), selected, assume_unique=False)
+        extra = rng.choice(remaining, size=max_samples - len(selected), replace=False)
+        selected = np.concatenate([selected, extra])
+    return np.sort(selected)
+
+
+def _plot_embedding_scatter(
+    embedding: np.ndarray,
+    labels: np.ndarray,
+    method_name: str,
+    algo_name: str,
+    dataset_name: str,
+    out_dir: str,
+    filename: str,
+) -> None:
+    unique_labels = sorted(np.unique(labels).tolist())
+    non_noise = [value for value in unique_labels if value != -1]
+    palette = sns.color_palette("colorblind", max(1, len(non_noise)))
+    color_map = {-1: "#9A9A9A"}
+    color_map.update({value: palette[i % len(palette)] for i, value in enumerate(non_noise)})
+    marker_size = 18 if len(labels) <= 1500 else 10
+
+    fig, ax = plt.subplots(figsize=(8.2, 6.1))
+    for cluster_id in unique_labels:
+        mask = labels == cluster_id
+        label_name = "Noise / outlier" if cluster_id == -1 else f"Cluster {cluster_id}"
+        ax.scatter(
+            embedding[mask, 0], embedding[mask, 1],
+            s=marker_size, alpha=0.58, linewidths=0,
+            color=color_map[cluster_id], label=label_name,
+            marker="x" if cluster_id == -1 else "o",
+        )
+    ax.set_title(
+        f"{method_name} view of cluster structure — {algo_name}\n"
+        f"{dataset_name} (stratified sample n={len(labels):,})"
+    )
+    ax.set_xlabel(f"{method_name} dimension 1")
+    ax.set_ylabel(f"{method_name} dimension 2")
+    ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1), fontsize=8,
+              markerscale=1.5, frameon=True)
+    ax.grid(alpha=0.18)
+    _savefig(fig, os.path.join(out_dir, filename))
+
+
+def _plot_nonlinear_embeddings(
+    X_scaled: np.ndarray,
+    labels: np.ndarray,
+    algo_name: str,
+    dataset_name: str,
+    out_dir: str,
+    config: dict,
+    random_state: int = 42,
+) -> None:
+    """Add t-SNE and Isomap manifold projections without changing trained models."""
+    if not config.get("nonlinear_embeddings", True) or len(X_scaled) < 5:
+        return
+    max_samples = max(50, int(config.get("embedding_max_samples", 1500)))
+    sample_idx = _embedding_sample_indices(labels, max_samples, random_state)
+    X_embed = np.asarray(X_scaled)[sample_idx]
+    labels_embed = np.asarray(labels)[sample_idx]
+
+    # PCA pre-reduction suppresses noise and keeps t-SNE tractable on wide data.
+    if X_embed.shape[1] > 30:
+        try:
+            from sklearn.decomposition import PCA
+            X_embed = PCA(n_components=30, random_state=random_state).fit_transform(X_embed)
+        except Exception as exc:
+            logger.warning(f"[CLUSTER] PCA pre-reduction skipped ({algo_name}): {exc}")
+
+    if config.get("tsne_enabled", True):
+        try:
+            from sklearn.manifold import TSNE
+            perplexity = min(
+                float(config.get("tsne_perplexity", 30)),
+                max(2.0, (len(X_embed) - 1) / 3),
+            )
+            tsne = TSNE(
+                n_components=2, perplexity=perplexity,
+                learning_rate="auto", init="pca",
+                max_iter=int(config.get("tsne_max_iter", 750)),
+                random_state=random_state,
+            )
+            tsne_embedding = tsne.fit_transform(X_embed)
+            _plot_embedding_scatter(
+                tsne_embedding, labels_embed, "t-SNE", algo_name,
+                dataset_name, out_dir, f"scatter_tsne_{algo_name}.png",
+            )
+        except Exception as exc:
+            logger.warning(f"[CLUSTER] Skip t-SNE ({algo_name}): {exc}")
+
+    if config.get("isomap_enabled", True):
+        try:
+            from sklearn.manifold import Isomap
+            neighbors = min(
+                max(2, int(config.get("isomap_n_neighbors", 10))),
+                len(X_embed) - 1,
+            )
+            isomap_embedding = Isomap(
+                n_neighbors=neighbors, n_components=2,
+                eigen_solver="arpack", n_jobs=1,
+            ).fit_transform(X_embed)
+            _plot_embedding_scatter(
+                isomap_embedding, labels_embed, "Isomap", algo_name,
+                dataset_name, out_dir,
+                f"scatter_manifold_isomap_{algo_name}.png",
+            )
+        except Exception as exc:
+            logger.warning(f"[CLUSTER] Skip Isomap manifold view ({algo_name}): {exc}")
 
 def _export_cluster_profile(
     X_features: pd.DataFrame,
@@ -214,6 +344,118 @@ def _export_cluster_profile(
     )
 
 
+def _plot_cluster_diagnostics(
+    X_scaled: np.ndarray,
+    X_features: pd.DataFrame,
+    labels: np.ndarray,
+    algo_name: str,
+    out_dir: str,
+    random_state: int = 42,
+    max_samples: int = 10000,
+) -> None:
+    """Cluster size, standardized profile, and per-sample silhouette views."""
+    max_samples = int(max_samples or 10000)
+    labels = np.asarray(labels)
+    unique, counts = np.unique(labels, return_counts=True)
+    order = np.argsort(counts)[::-1]
+    unique, counts = unique[order], counts[order]
+    if len(unique) > 20:
+        unique, counts = unique[:20], counts[:20]
+    names = ["Noise (-1)" if value == -1 else f"Cluster {value}" for value in unique]
+    fig, ax = plt.subplots(figsize=(10, max(4, len(unique) * 0.35)))
+    bars = ax.barh(names, counts, color=["#999999" if value == -1 else "#4C72B0" for value in unique])
+    ax.invert_yaxis()
+    for bar, count in zip(bars, counts):
+        ax.text(count + max(counts) * 0.01, bar.get_y() + bar.get_height() / 2,
+                f"{count:,} ({count / len(labels) * 100:.1f}%)", va="center", fontsize=8)
+    ax.set_xlim(0, max(counts) * 1.25)
+    ax.set_title(f"Cluster sizes — {algo_name}")
+    ax.set_xlabel("Number of observations")
+    ax.set_ylabel("Cluster")
+    _savefig(fig, os.path.join(out_dir, f"cluster_sizes_{algo_name}.png"))
+
+    profile = X_features.copy()
+    profile["cluster"] = labels
+    means = profile.groupby("cluster").mean(numeric_only=True)
+    if not means.empty:
+        # A report figure cannot show dozens of tiny DBSCAN clusters legibly.
+        # Retain the 20 largest clusters; the complete profile remains in CSV.
+        if len(means) > 20:
+            largest_clusters = profile["cluster"].value_counts().head(20).index
+            means = means.loc[means.index.intersection(largest_clusters)]
+        variability = means.std(axis=0).sort_values(ascending=False)
+        top_features = variability.head(15).index.tolist()
+        selected = means[top_features]
+        standardized = (selected - X_features[top_features].mean()) / X_features[top_features].std(ddof=0).replace(0, np.nan)
+        standardized = standardized.fillna(0)
+        fig, ax = plt.subplots(figsize=(max(8, len(top_features) * 0.65), max(4, len(standardized) * 0.42)))
+        sns.heatmap(standardized, cmap="coolwarm", center=0, linewidths=0.3, ax=ax,
+                    cbar_kws={"label": "Cluster mean relative to overall mean (z-score)"})
+        ax.set_title(f"Cluster feature profiles — {algo_name}")
+        ax.set_xlabel("Feature")
+        ax.set_ylabel("Cluster")
+        plt.xticks(rotation=45, ha="right")
+        _savefig(fig, os.path.join(out_dir, f"cluster_profile_heatmap_{algo_name}.png"))
+
+    valid_unique = [value for value in np.unique(labels) if value != -1]
+    if 2 <= len(valid_unique) <= 15:
+        if len(labels) > max_samples:
+            rng = np.random.RandomState(random_state)
+            idx = np.sort(rng.choice(len(labels), size=max_samples, replace=False))
+            X_eval, labels_eval = X_scaled[idx], labels[idx]
+        else:
+            X_eval, labels_eval = X_scaled, labels
+        if len(np.unique(labels_eval)) >= 2:
+            try:
+                sample_scores = silhouette_samples(X_eval, labels_eval)
+                fig, ax = plt.subplots(figsize=(9, 5.5))
+                y_lower = 10
+                palette = sns.color_palette("colorblind", len(np.unique(labels_eval)))
+                for color, cluster_id in zip(palette, sorted(np.unique(labels_eval))):
+                    values = np.sort(sample_scores[labels_eval == cluster_id])
+                    y_upper = y_lower + len(values)
+                    ax.fill_betweenx(np.arange(y_lower, y_upper), 0, values,
+                                     facecolor=color, edgecolor=color, alpha=0.75)
+                    ax.text(-0.05, y_lower + len(values) / 2, str(cluster_id), fontsize=8)
+                    y_lower = y_upper + 10
+                mean_score = float(np.mean(sample_scores))
+                ax.axvline(mean_score, color="red", linestyle="--", label=f"Mean={mean_score:.3f}")
+                ax.set_title(f"Silhouette distribution — {algo_name}")
+                ax.set_xlabel("Silhouette coefficient")
+                ax.set_ylabel("Samples grouped by cluster")
+                ax.set_yticks([])
+                ax.legend()
+                _savefig(fig, os.path.join(out_dir, f"silhouette_distribution_{algo_name}.png"))
+            except Exception as exc:
+                logger.warning(f"[CLUSTER] Skip silhouette distribution ({algo_name}): {exc}")
+
+
+def _plot_clustering_comparison(results: dict, out_dir: str) -> None:
+    rows = []
+    for algorithm, values in results.items():
+        rows.append({
+            "algorithm": algorithm,
+            "silhouette": values.get("silhouette_score", np.nan),
+            "n_clusters": values.get("n_clusters", np.nan),
+            "n_outliers": values.get("n_outliers", 0),
+        })
+    frame = pd.DataFrame(rows).set_index("algorithm")
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.8))
+    frame["silhouette"].plot(kind="bar", ax=axes[0], color="#4C72B0", edgecolor="black")
+    axes[0].axhline(0, color="black", linewidth=1)
+    axes[0].set_title("Silhouette comparison")
+    axes[0].set_xlabel("Algorithm")
+    axes[0].set_ylabel("Silhouette score")
+    frame["n_clusters"].plot(kind="bar", ax=axes[1], color="#55A868", edgecolor="black")
+    axes[1].set_title("Number of discovered clusters")
+    axes[1].set_xlabel("Algorithm")
+    axes[1].set_ylabel("Clusters")
+    for ax in axes:
+        ax.tick_params(axis="x", rotation=25)
+    plt.tight_layout()
+    _savefig(fig, os.path.join(out_dir, "clustering_model_comparison.png"))
+
+
 class ClusteringPipeline:
     """
     Pipeline clustering tổng quát.
@@ -248,14 +490,9 @@ class ClusteringPipeline:
             dict kết quả {algorithm: {labels, silhouette_score, n_clusters}}.
         """
         cl_cfg = config.get("clustering", {})
-        out_dir = os.path.join(
-            config.get("base_output_dir", "outputs"),
-            dataset_name, "ml", "clustering"
-        )
-        model_dir = os.path.join(
-            config.get("base_output_dir", "outputs"),
-            dataset_name, "models"
-        )
+        dataset_root = dataset_output_root(config, dataset_name)
+        out_dir = str(dataset_root / "ml" / "clustering")
+        model_dir = str(dataset_root / "models")
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         Path(model_dir).mkdir(parents=True, exist_ok=True)
 
@@ -297,6 +534,7 @@ class ClusteringPipeline:
         results["hierarchical"] = self._run_hierarchical(X_scaled, X, cl_cfg, out_dir, dataset_name, config)
         results["dbscan"] = self._run_dbscan(X_scaled, X, cl_cfg, out_dir, dataset_name, config)
         results["gaussian_mixture"] = self._run_gaussian_mixture(X_scaled, X, cl_cfg, out_dir, dataset_name, config)
+        _plot_clustering_comparison(results, out_dir)
 
         logger.info(f"[CLUSTER] Hoàn thành clustering cho {dataset_name}")
         return results
@@ -369,10 +607,19 @@ class ClusteringPipeline:
         labels_df = pd.DataFrame({"kmeans_cluster": final_labels}, index=index)
         labels_df.to_csv(os.path.join(out_dir, "kmeans_labels.csv"))
         _export_cluster_profile(X_features, final_labels, "kmeans", out_dir)
+        _plot_cluster_diagnostics(
+            X_scaled, X_features, final_labels, "kmeans", out_dir,
+            random_state=self.random_state,
+            max_samples=cl_cfg.get("silhouette_max_samples", 10000),
+        )
         _plot_cluster_pca(
             X_scaled, final_labels, "kmeans", dataset_name, out_dir,
             max_samples=cl_cfg.get("plot_max_samples"),
             random_state=self.random_state,
+        )
+        _plot_nonlinear_embeddings(
+            X_scaled, final_labels, "kmeans", dataset_name, out_dir,
+            cl_cfg, random_state=self.random_state,
         )
 
         # ── Subsampling CV: đánh giá độ ổn định silhouette ───────────────────────
@@ -482,10 +729,19 @@ class ClusteringPipeline:
         labels_df = pd.DataFrame({"hierarchical_cluster": labels}, index=index_h)
         labels_df.to_csv(os.path.join(out_dir, "hierarchical_labels.csv"))
         _export_cluster_profile(X_h_features, labels, "hierarchical", out_dir)
+        _plot_cluster_diagnostics(
+            X_h, X_h_features, labels, "hierarchical", out_dir,
+            random_state=self.random_state,
+            max_samples=cl_cfg.get("silhouette_max_samples", 10000),
+        )
         _plot_cluster_pca(
             X_h, labels, "hierarchical", dataset_name, out_dir,
             max_samples=cl_cfg.get("plot_max_samples"),
             random_state=self.random_state,
+        )
+        _plot_nonlinear_embeddings(
+            X_h, labels, "hierarchical", dataset_name, out_dir,
+            cl_cfg, random_state=self.random_state,
         )
 
         _append_summary({
@@ -537,10 +793,19 @@ class ClusteringPipeline:
             labels_df["sampled_for_dbscan"] = True
         labels_df.to_csv(os.path.join(out_dir, "dbscan_labels.csv"))
         _export_cluster_profile(X_db_features, labels, "dbscan", out_dir)
+        _plot_cluster_diagnostics(
+            X_db, X_db_features, labels, "dbscan", out_dir,
+            random_state=self.random_state,
+            max_samples=cl_cfg.get("silhouette_max_samples", 10000),
+        )
         _plot_cluster_pca(
             X_db, labels, "dbscan", dataset_name, out_dir,
             max_samples=cl_cfg.get("plot_max_samples"),
             random_state=self.random_state,
+        )
+        _plot_nonlinear_embeddings(
+            X_db, labels, "dbscan", dataset_name, out_dir,
+            cl_cfg, random_state=self.random_state,
         )
 
         _append_summary({
@@ -599,10 +864,19 @@ class ClusteringPipeline:
         labels_df = pd.DataFrame({"gmm_cluster": labels}, index=index)
         labels_df.to_csv(os.path.join(out_dir, "gmm_labels.csv"))
         _export_cluster_profile(X_features, labels, "gmm", out_dir)
+        _plot_cluster_diagnostics(
+            X_scaled, X_features, labels, "gmm", out_dir,
+            random_state=self.random_state,
+            max_samples=cl_cfg.get("silhouette_max_samples", 10000),
+        )
         _plot_cluster_pca(
             X_scaled, labels, "gmm", dataset_name, out_dir,
             max_samples=cl_cfg.get("plot_max_samples"),
             random_state=self.random_state,
+        )
+        _plot_nonlinear_embeddings(
+            X_scaled, labels, "gmm", dataset_name, out_dir,
+            cl_cfg, random_state=self.random_state,
         )
 
         # ── Subsampling CV: đánh giá độ ổn định silhouette ───────────────────────

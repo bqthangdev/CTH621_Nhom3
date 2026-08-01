@@ -57,7 +57,7 @@ Tổng cộng có **4.752 ảnh** phân bố trên **9 danh mục**. Bảng 2.33
 | 3 | Miscellaneous Trash | Rác hỗn hợp | 495 | 10,42 |
 | 4 | Paper | Giấy | 500 | 10,52 |
 | 5 | Cardboard | Bìa cứng / Carton | 461 | 9,70 |
-| 6 | Vegetation | Thực vật / Rác vườn | 436 | 9,17 |
+| 6 | Vegetation | Thực vật / Rác vườn | 436 | 9,18 |
 | 7 | Glass | Thủy tinh | 420 | 8,84 |
 | 8 | Food Organics | Thực phẩm hữu cơ | 411 | 8,65 |
 | 9 | Textile Trash | Rác dệt may | 318 | 6,69 |
