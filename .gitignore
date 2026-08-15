@@ -65,6 +65,7 @@ outputs/**/*.pkl
 outputs/**/*.csv
 outputs/**/*.xlsx
 *-bk-*
+*_bk_*
 
 # ── Logs ──────────────────────────────────────────────────────
 logs/*.log

@@ -272,8 +272,8 @@ datasets:
     type: "A"
     file: "data/raw/tabular/healthcare_dataset_stroke/healthcare-dataset-stroke-data.csv"
     drop_columns: ["id"]           # Cột định danh — loại bỏ trước khi xử lý
-    encode_categoricals: true      # One-hot encode các cột object trước khi lưu parquet
-    protect_columns: ["stroke", "hypertension", "heart_disease"]  # Không cap/normalize target columns
+    encode_categoricals: true      # Bật để các cột dạng chữ được mã hóa one-hot khi tạo dữ liệu transformed
+    protect_columns: ["stroke", "hypertension", "heart_disease"]  # Không cap outlier hoặc normalize target columns
     visualization:
       continuous_columns: ["age", "avg_glucose_level", "bmi"]
       categorical_columns: ["gender", "hypertension", "heart_disease", "ever_married", "work_type", "Residence_type", "smoking_status", "stroke"]
